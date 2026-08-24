@@ -18,6 +18,19 @@ function required(payload: Record<string, unknown>, fields: string[]) {
   return fields.find((field) => !clean(payload[field]));
 }
 
+function validDate(value: unknown) {
+  const normalized = clean(value);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalized);
+  if (!match) return false;
+  const [, year, month, day] = match.map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+}
+
+function invalidDate(payload: Record<string, unknown>, fields: string[]) {
+  return fields.find((field) => !validDate(payload[field]));
+}
+
 function usesNetlifyStorage() {
   return typeof process !== "undefined" && process.env.NETLIFY === "true";
 }
@@ -112,6 +125,9 @@ export async function POST(request: Request) {
     if (type === "order") {
       const missing = required(payload, ["title", "customerId", "assignedPersonId", "eventDate"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      if (invalidDate(payload, ["eventDate"])) {
+        return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
+      }
       const customerId = clean(payload.customerId);
       const assignedPersonId = clean(payload.assignedPersonId);
       const [[customer], [assignedPerson]] = await Promise.all([
@@ -120,6 +136,8 @@ export async function POST(request: Request) {
       ]);
       if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
       if (!assignedPerson) return Response.json({ error: "Select a valid execution lead" }, { status: 400 });
+      const contractValue = money(payload.contractValue);
+      if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
       const row = {
         id: crypto.randomUUID(),
         orderNo: clean(payload.orderNo) || `ORD-${Date.now().toString().slice(-6)}`,
@@ -129,7 +147,7 @@ export async function POST(request: Request) {
         venue: clean(payload.venue),
         eventDate: clean(payload.eventDate),
         status: clean(payload.status) || "Planned",
-        contractValue: money(payload.contractValue),
+        contractValue,
         createdAt,
       };
       await db.insert(orders).values(row);
@@ -139,6 +157,12 @@ export async function POST(request: Request) {
     if (type === "invoice") {
       const missing = required(payload, ["invoiceNo", "customerId", "orderId", "billedPersonId", "issueDate", "dueDate"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      if (invalidDate(payload, ["issueDate", "dueDate"])) {
+        return Response.json({ error: "Enter valid invoice and due dates" }, { status: 400 });
+      }
+      if (clean(payload.dueDate) < clean(payload.issueDate)) {
+        return Response.json({ error: "Due date cannot be before the invoice date" }, { status: 400 });
+      }
       const customerId = clean(payload.customerId);
       const orderId = clean(payload.orderId);
       const billedPersonId = clean(payload.billedPersonId);
@@ -155,6 +179,7 @@ export async function POST(request: Request) {
       if (!billedPerson) return Response.json({ error: "Select a valid billed person" }, { status: 400 });
       const subtotal = money(payload.subtotal);
       const tax = money(payload.tax);
+      if (!subtotal) return Response.json({ error: "Taxable amount must be greater than zero" }, { status: 400 });
       const status = clean(payload.status) || "Sent";
       if (!["Draft", "Sent", "Overdue"].includes(status)) {
         return Response.json({ error: "Record payments separately after creating the invoice" }, { status: 400 });
@@ -185,6 +210,9 @@ export async function POST(request: Request) {
     if (type === "expense") {
       const missing = required(payload, ["orderId", "personId", "category", "expenseDate", "amount"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      if (invalidDate(payload, ["expenseDate"])) {
+        return Response.json({ error: "Enter a valid expense date" }, { status: 400 });
+      }
       const orderId = clean(payload.orderId);
       const personId = clean(payload.personId);
       const [[order], [person]] = await Promise.all([
@@ -193,6 +221,8 @@ export async function POST(request: Request) {
       ]);
       if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
       if (!person) return Response.json({ error: "Select a valid responsible person" }, { status: 400 });
+      const amount = money(payload.amount);
+      if (!amount) return Response.json({ error: "Expense amount must be greater than zero" }, { status: 400 });
       const row = {
         id: crypto.randomUUID(),
         expenseNo: clean(payload.expenseNo) || `EXP-${Date.now().toString().slice(-6)}`,
@@ -202,7 +232,7 @@ export async function POST(request: Request) {
         vendor: clean(payload.vendor),
         description: clean(payload.description),
         expenseDate: clean(payload.expenseDate),
-        amount: money(payload.amount),
+        amount,
         paymentMode: clean(payload.paymentMode) || "UPI",
         receiptKey: clean(payload.receiptKey),
         receiptName: clean(payload.receiptName),
@@ -215,6 +245,9 @@ export async function POST(request: Request) {
     if (type === "payment") {
       const missing = required(payload, ["direction", "amount", "paymentDate", "method"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      if (invalidDate(payload, ["paymentDate"])) {
+        return Response.json({ error: "Enter a valid payment date" }, { status: 400 });
+      }
       const direction = clean(payload.direction);
       if (!["Received", "Paid"].includes(direction)) {
         return Response.json({ error: "Select a valid payment type" }, { status: 400 });
@@ -238,6 +271,7 @@ export async function POST(request: Request) {
         return Response.json({ error: "Select a customer or invoice for money received" }, { status: 400 });
       }
       const amount = money(payload.amount);
+      if (!amount) return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
       if (linkedInvoice && amount > linkedInvoice.total - linkedInvoice.paidAmount) {
         return Response.json({ error: "Payment is greater than the invoice balance" }, { status: 400 });
       }
