@@ -1,4 +1,11 @@
-import { getDatabase } from "@netlify/database";
+import {
+  Db,
+  MongoClient,
+  MongoServerError,
+  type ClientSession,
+  type Collection,
+  type Filter,
+} from "mongodb";
 
 type Payload = Record<string, unknown>;
 
@@ -87,9 +94,21 @@ type Payment = {
   createdAt: string;
 };
 
+type Collections = {
+  customers: Collection<Customer>;
+  persons: Collection<Person>;
+  orders: Collection<Order>;
+  invoices: Collection<Invoice>;
+  expenses: Collection<Expense>;
+  payments: Collection<Payment>;
+};
+
 const now = () => new Date().toISOString();
 const clean = (value: unknown) => String(value ?? "").trim();
 const money = (value: unknown) => Math.max(0, Math.round(Number(value) || 0));
+
+let mongoClientPromise: Promise<MongoClient> | null = null;
+let mongoIndexesPromise: Promise<void> | null = null;
 
 function required(payload: Payload, fields: string[]) {
   return fields.find((field) => !clean(payload[field]));
@@ -108,42 +127,96 @@ function invalidDate(payload: Payload, fields: string[]) {
   return fields.find((field) => !validDate(payload[field]));
 }
 
+function getMongoUri() {
+  const uri = process.env.MONGODB_URI?.trim();
+  if (!uri) throw new Error("MongoDB storage is not configured");
+  return uri;
+}
+
+function getMongoClient() {
+  if (!mongoClientPromise) {
+    const uri = getMongoUri();
+    const client = new MongoClient(uri, {
+      appName: "erentals-expense-manager",
+      maxIdleTimeMS: 30_000,
+      maxPoolSize: 10,
+      minPoolSize: 0,
+      serverSelectionTimeoutMS: 5_000,
+      waitQueueTimeoutMS: 5_000,
+    });
+    mongoClientPromise = client.connect().catch((error) => {
+      mongoClientPromise = null;
+      throw error;
+    });
+  }
+  return mongoClientPromise;
+}
+
+function getCollections(db: Db): Collections {
+  return {
+    customers: db.collection<Customer>("customers"),
+    persons: db.collection<Person>("persons"),
+    orders: db.collection<Order>("orders"),
+    invoices: db.collection<Invoice>("invoices"),
+    expenses: db.collection<Expense>("expenses"),
+    payments: db.collection<Payment>("payments"),
+  };
+}
+
+function ensureMongoIndexes(collections: Collections) {
+  if (!mongoIndexesPromise) {
+    mongoIndexesPromise = Promise.all([
+      collections.customers.createIndex({ createdAt: -1 }),
+      collections.persons.createIndex({ createdAt: -1 }),
+      collections.orders.createIndex({ orderNo: 1 }, { unique: true }),
+      collections.orders.createIndex({ customerId: 1 }),
+      collections.invoices.createIndex({ invoiceNo: 1 }, { unique: true }),
+      collections.invoices.createIndex({ customerId: 1 }),
+      collections.invoices.createIndex({ orderId: 1 }),
+      collections.invoices.createIndex({ dueDate: 1 }),
+      collections.expenses.createIndex({ expenseNo: 1 }, { unique: true }),
+      collections.expenses.createIndex({ orderId: 1 }),
+      collections.expenses.createIndex({ expenseDate: -1 }),
+      collections.payments.createIndex({ customerId: 1 }),
+      collections.payments.createIndex({ invoiceId: 1 }),
+      collections.payments.createIndex({ paymentDate: -1 }),
+    ]).then(() => undefined).catch((error) => {
+      mongoIndexesPromise = null;
+      throw error;
+    });
+  }
+  return mongoIndexesPromise;
+}
+
+async function getMongoDatabase() {
+  const client = await getMongoClient();
+  const databaseName = process.env.MONGODB_DB_NAME?.trim() || "erentals_expense_manager";
+  const db = client.db(databaseName);
+  const collections = getCollections(db);
+  await ensureMongoIndexes(collections);
+  return { client, collections };
+}
+
+async function findById<T extends { id: string }>(
+  collection: Collection<T>,
+  id: string,
+  session?: ClientSession,
+) {
+  return collection.findOne({ id } as Filter<T>, { projection: { _id: 0 }, session });
+}
+
 export async function GET() {
   try {
-    const { sql } = getDatabase();
+    const { collections } = await getMongoDatabase();
+    const options = { projection: { _id: 0 } };
     const [customers, persons, orders, invoices, expenses, payments] = await Promise.all([
-      sql<Customer>`SELECT
-        id, name, business_name AS "businessName", phone, email, gstin, address,
-        opening_balance AS "openingBalance", created_at AS "createdAt"
-        FROM customers ORDER BY created_at DESC`,
-      sql<Person>`SELECT
-        id, name, role, phone, email, payment_mode AS "paymentMode", status,
-        created_at AS "createdAt"
-        FROM persons ORDER BY created_at DESC`,
-      sql<Order>`SELECT
-        id, order_no AS "orderNo", title, customer_id AS "customerId",
-        assigned_person_id AS "assignedPersonId", venue, event_date AS "eventDate",
-        status, contract_value AS "contractValue", created_at AS "createdAt"
-        FROM orders ORDER BY created_at DESC`,
-      sql<Invoice>`SELECT
-        id, invoice_no AS "invoiceNo", customer_id AS "customerId", order_id AS "orderId",
-        billed_person_id AS "billedPersonId", issue_date AS "issueDate", due_date AS "dueDate",
-        subtotal, tax, total, paid_amount AS "paidAmount", status, notes,
-        attachment_key AS "attachmentKey", attachment_name AS "attachmentName",
-        attachment_type AS "attachmentType", created_at AS "createdAt"
-        FROM invoices ORDER BY created_at DESC`,
-      sql<Expense>`SELECT
-        id, expense_no AS "expenseNo", order_id AS "orderId", person_id AS "personId",
-        category, vendor, description, expense_date AS "expenseDate", amount,
-        payment_mode AS "paymentMode", receipt_key AS "receiptKey",
-        receipt_name AS "receiptName", created_at AS "createdAt"
-        FROM expenses ORDER BY created_at DESC`,
-      sql<Payment>`SELECT
-        id, invoice_id AS "invoiceId", customer_id AS "customerId", direction, amount,
-        payment_date AS "paymentDate", method, reference, notes, created_at AS "createdAt"
-        FROM payments ORDER BY created_at DESC`,
+      collections.customers.find({}, options).sort({ createdAt: -1 }).toArray(),
+      collections.persons.find({}, options).sort({ createdAt: -1 }).toArray(),
+      collections.orders.find({}, options).sort({ createdAt: -1 }).toArray(),
+      collections.invoices.find({}, options).sort({ createdAt: -1 }).toArray(),
+      collections.expenses.find({}, options).sort({ createdAt: -1 }).toArray(),
+      collections.payments.find({}, options).sort({ createdAt: -1 }).toArray(),
     ]);
-
     return Response.json({ customers, persons, orders, invoices, expenses, payments });
   } catch (error) {
     return Response.json(
@@ -158,7 +231,7 @@ export async function POST(request: Request) {
     const body = (await request.json()) as { type?: string; payload?: Payload };
     const type = clean(body.type);
     const payload = body.payload ?? {};
-    const { sql } = getDatabase();
+    const { client, collections } = await getMongoDatabase();
     const createdAt = now();
 
     if (type === "customer") {
@@ -175,10 +248,7 @@ export async function POST(request: Request) {
         openingBalance: Math.round(Number(payload.openingBalance) || 0),
         createdAt,
       };
-      await sql`INSERT INTO customers
-        (id, name, business_name, phone, email, gstin, address, opening_balance, created_at)
-        VALUES (${row.id}, ${row.name}, ${row.businessName}, ${row.phone}, ${row.email},
-          ${row.gstin}, ${row.address}, ${row.openingBalance}, ${row.createdAt})`;
+      await collections.customers.insertOne(row);
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -195,10 +265,7 @@ export async function POST(request: Request) {
         status: "Active",
         createdAt,
       };
-      await sql`INSERT INTO persons
-        (id, name, role, phone, email, payment_mode, status, created_at)
-        VALUES (${row.id}, ${row.name}, ${row.role}, ${row.phone}, ${row.email},
-          ${row.paymentMode}, ${row.status}, ${row.createdAt})`;
+      await collections.persons.insertOne(row);
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -210,9 +277,9 @@ export async function POST(request: Request) {
       }
       const customerId = clean(payload.customerId);
       const assignedPersonId = clean(payload.assignedPersonId);
-      const [[customer], [assignedPerson]] = await Promise.all([
-        sql<{ id: string }>`SELECT id FROM customers WHERE id = ${customerId} LIMIT 1`,
-        sql<{ id: string }>`SELECT id FROM persons WHERE id = ${assignedPersonId} LIMIT 1`,
+      const [customer, assignedPerson] = await Promise.all([
+        findById(collections.customers, customerId),
+        findById(collections.persons, assignedPersonId),
       ]);
       if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
       if (!assignedPerson) {
@@ -234,12 +301,7 @@ export async function POST(request: Request) {
         contractValue,
         createdAt,
       };
-      await sql`INSERT INTO orders
-        (id, order_no, title, customer_id, assigned_person_id, venue, event_date, status,
-          contract_value, created_at)
-        VALUES (${row.id}, ${row.orderNo}, ${row.title}, ${row.customerId},
-          ${row.assignedPersonId}, ${row.venue}, ${row.eventDate}, ${row.status},
-          ${row.contractValue}, ${row.createdAt})`;
+      await collections.orders.insertOne(row);
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -260,11 +322,10 @@ export async function POST(request: Request) {
       const customerId = clean(payload.customerId);
       const orderId = clean(payload.orderId);
       const billedPersonId = clean(payload.billedPersonId);
-      const [[customer], [order], [billedPerson]] = await Promise.all([
-        sql<{ id: string }>`SELECT id FROM customers WHERE id = ${customerId} LIMIT 1`,
-        sql<{ id: string; customerId: string }>`SELECT id, customer_id AS "customerId"
-          FROM orders WHERE id = ${orderId} LIMIT 1`,
-        sql<{ id: string }>`SELECT id FROM persons WHERE id = ${billedPersonId} LIMIT 1`,
+      const [customer, order, billedPerson] = await Promise.all([
+        findById(collections.customers, customerId),
+        findById(collections.orders, orderId),
+        findById(collections.persons, billedPersonId),
       ]);
       if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
       if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
@@ -311,14 +372,7 @@ export async function POST(request: Request) {
         attachmentType: clean(payload.attachmentType),
         createdAt,
       };
-      await sql`INSERT INTO invoices
-        (id, invoice_no, customer_id, order_id, billed_person_id, issue_date, due_date,
-          subtotal, tax, total, paid_amount, status, notes, attachment_key, attachment_name,
-          attachment_type, created_at)
-        VALUES (${row.id}, ${row.invoiceNo}, ${row.customerId}, ${row.orderId},
-          ${row.billedPersonId}, ${row.issueDate}, ${row.dueDate}, ${row.subtotal}, ${row.tax},
-          ${row.total}, ${row.paidAmount}, ${row.status}, ${row.notes}, ${row.attachmentKey},
-          ${row.attachmentName}, ${row.attachmentType}, ${row.createdAt})`;
+      await collections.invoices.insertOne(row);
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -330,9 +384,9 @@ export async function POST(request: Request) {
       }
       const orderId = clean(payload.orderId);
       const personId = clean(payload.personId);
-      const [[order], [person]] = await Promise.all([
-        sql<{ id: string }>`SELECT id FROM orders WHERE id = ${orderId} LIMIT 1`,
-        sql<{ id: string }>`SELECT id FROM persons WHERE id = ${personId} LIMIT 1`,
+      const [order, person] = await Promise.all([
+        findById(collections.orders, orderId),
+        findById(collections.persons, personId),
       ]);
       if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
       if (!person) {
@@ -357,12 +411,7 @@ export async function POST(request: Request) {
         receiptName: clean(payload.receiptName),
         createdAt,
       };
-      await sql`INSERT INTO expenses
-        (id, expense_no, order_id, person_id, category, vendor, description, expense_date,
-          amount, payment_mode, receipt_key, receipt_name, created_at)
-        VALUES (${row.id}, ${row.expenseNo}, ${row.orderId}, ${row.personId}, ${row.category},
-          ${row.vendor}, ${row.description}, ${row.expenseDate}, ${row.amount},
-          ${row.paymentMode}, ${row.receiptKey}, ${row.receiptName}, ${row.createdAt})`;
+      await collections.expenses.insertOne(row);
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -376,51 +425,18 @@ export async function POST(request: Request) {
       if (!["Received", "Paid"].includes(direction)) {
         return Response.json({ error: "Select a valid payment type" }, { status: 400 });
       }
-      const invoiceId = clean(payload.invoiceId);
-      let customerId = clean(payload.customerId);
-      let linkedInvoice: Pick<Invoice, "id" | "customerId" | "total" | "paidAmount"> | undefined;
-      if (invoiceId) {
-        [linkedInvoice] = await sql<Pick<Invoice, "id" | "customerId" | "total" | "paidAmount">>`
-          SELECT id, customer_id AS "customerId", total, paid_amount AS "paidAmount"
-          FROM invoices WHERE id = ${invoiceId} LIMIT 1`;
-        if (!linkedInvoice) {
-          return Response.json({ error: "Select a valid invoice" }, { status: 400 });
-        }
-        if (direction !== "Received") {
-          return Response.json(
-            { error: "Only received payments can be linked to a sales invoice" },
-            { status: 400 },
-          );
-        }
-        customerId = linkedInvoice.customerId;
-      }
-      if (customerId) {
-        const [customer] = await sql<{ id: string }>`SELECT id FROM customers
-          WHERE id = ${customerId} LIMIT 1`;
-        if (!customer) {
-          return Response.json({ error: "Select a valid customer" }, { status: 400 });
-        }
-      }
-      if (direction === "Received" && !customerId) {
-        return Response.json(
-          { error: "Select a customer or invoice for money received" },
-          { status: 400 },
-        );
-      }
       const amount = money(payload.amount);
       if (!amount) {
         return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
       }
-      if (linkedInvoice && amount > linkedInvoice.total - linkedInvoice.paidAmount) {
-        return Response.json(
-          { error: "Payment is greater than the invoice balance" },
-          { status: 400 },
-        );
-      }
+
+      const invoiceId = clean(payload.invoiceId);
+      const requestedCustomerId = clean(payload.customerId);
+      const session = client.startSession();
       const row: Payment = {
         id: crypto.randomUUID(),
         invoiceId,
-        customerId,
+        customerId: requestedCustomerId,
         direction,
         amount,
         paymentDate: clean(payload.paymentDate),
@@ -429,17 +445,42 @@ export async function POST(request: Request) {
         notes: clean(payload.notes),
         createdAt,
       };
-      await sql`INSERT INTO payments
-        (id, invoice_id, customer_id, direction, amount, payment_date, method, reference,
-          notes, created_at)
-        VALUES (${row.id}, ${row.invoiceId}, ${row.customerId}, ${row.direction}, ${row.amount},
-          ${row.paymentDate}, ${row.method}, ${row.reference}, ${row.notes}, ${row.createdAt})`;
 
-      if (linkedInvoice) {
-        const paidAmount = linkedInvoice.paidAmount + row.amount;
-        const status = paidAmount >= linkedInvoice.total ? "Paid" : "Part paid";
-        await sql`UPDATE invoices SET paid_amount = ${paidAmount}, status = ${status}
-          WHERE id = ${linkedInvoice.id}`;
+      try {
+        await session.withTransaction(async () => {
+          const linkedInvoice = invoiceId
+            ? await findById(collections.invoices, invoiceId, session)
+            : null;
+          if (invoiceId && !linkedInvoice) throw new FormError("Select a valid invoice");
+          if (linkedInvoice && direction !== "Received") {
+            throw new FormError("Only received payments can be linked to a sales invoice");
+          }
+          if (linkedInvoice) row.customerId = linkedInvoice.customerId;
+
+          if (row.customerId) {
+            const customer = await findById(collections.customers, row.customerId, session);
+            if (!customer) throw new FormError("Select a valid customer");
+          }
+          if (direction === "Received" && !row.customerId) {
+            throw new FormError("Select a customer or invoice for money received");
+          }
+          if (linkedInvoice && amount > linkedInvoice.total - linkedInvoice.paidAmount) {
+            throw new FormError("Payment is greater than the invoice balance");
+          }
+
+          await collections.payments.insertOne(row, { session });
+          if (linkedInvoice) {
+            const paidAmount = linkedInvoice.paidAmount + amount;
+            const status = paidAmount >= linkedInvoice.total ? "Paid" : "Part paid";
+            await collections.invoices.updateOne(
+              { id: linkedInvoice.id },
+              { $set: { paidAmount, status } },
+              { session },
+            );
+          }
+        });
+      } finally {
+        await session.endSession();
       }
       return Response.json({ record: row }, { status: 201 });
     }
@@ -447,11 +488,13 @@ export async function POST(request: Request) {
     return Response.json({ error: "Unsupported record type" }, { status: 400 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to save record";
-    const code = (error as { code?: string }).code;
     const friendly =
-      code === "23505" || message.toLowerCase().includes("duplicate key")
+      error instanceof MongoServerError && error.code === 11000
         ? "That reference number already exists"
         : message;
-    return Response.json({ error: friendly }, { status: 500 });
+    const status = error instanceof FormError ? 400 : 500;
+    return Response.json({ error: friendly }, { status });
   }
 }
+
+class FormError extends Error {}

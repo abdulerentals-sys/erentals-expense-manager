@@ -37,8 +37,8 @@ function usesNetlifyStorage() {
 
 export async function GET() {
   if (usesNetlifyStorage()) {
-    const netlify = await import("./netlify");
-    return netlify.GET();
+    const mongodb = await import("./mongodb");
+    return mongodb.GET();
   }
 
   try {
@@ -72,8 +72,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   if (usesNetlifyStorage()) {
-    const netlify = await import("./netlify");
-    return netlify.POST(request);
+    const mongodb = await import("./mongodb");
+    return mongodb.POST(request);
   }
 
   try {

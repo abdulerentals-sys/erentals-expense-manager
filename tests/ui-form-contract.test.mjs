@@ -12,32 +12,25 @@ test("the dashboard uses readable type and mobile-first controls", async () => {
 });
 
 test("every record form is wired and dated transactions persist their dates", async () => {
-  const [dashboard, sitesRoute, netlifyRoute, migration] = await Promise.all([
+  const [dashboard, sitesRoute, mongoRoute] = await Promise.all([
     readFile(new URL("../app/components/ExpenseDashboard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/records/route.ts", import.meta.url), "utf8"),
-    readFile(new URL("../app/api/records/netlify.ts", import.meta.url), "utf8"),
-    readFile(
-      new URL(
-        "../netlify/database/migrations/20260824090000_create_expense_manager.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
+    readFile(new URL("../app/api/records/mongodb.ts", import.meta.url), "utf8"),
   ]);
 
   for (const kind of ["customer", "person", "order", "invoice", "expense", "payment"]) {
     assert.match(dashboard, new RegExp(`kind === "${kind}"`));
     assert.match(sitesRoute, new RegExp(`type === "${kind}"`));
-    assert.match(netlifyRoute, new RegExp(`type === "${kind}"`));
+    assert.match(mongoRoute, new RegExp(`type === "${kind}"`));
   }
 
   for (const field of ["eventDate", "issueDate", "dueDate", "expenseDate", "paymentDate"]) {
     assert.match(dashboard, new RegExp(`name="${field}"[^>]*type="date"`));
     assert.match(sitesRoute, new RegExp(`${field}: clean\\(payload\\.${field}\\)`));
-    assert.match(netlifyRoute, new RegExp(`${field}: clean\\(payload\\.${field}\\)`));
+    assert.match(mongoRoute, new RegExp(`${field}: clean\\(payload\\.${field}\\)`));
   }
 
-  for (const route of [sitesRoute, netlifyRoute]) {
+  for (const route of [sitesRoute, mongoRoute]) {
     assert.match(route, /invalidDate\(payload, \["eventDate"\]\)/);
     assert.match(route, /invalidDate\(payload, \["issueDate", "dueDate"\]\)/);
     assert.match(route, /invalidDate\(payload, \["expenseDate"\]\)/);
@@ -46,7 +39,6 @@ test("every record form is wired and dated transactions persist their dates", as
     assert.match(route, /Payment amount must be greater than zero/);
   }
 
-  for (const column of ["event_date", "issue_date", "due_date", "expense_date", "payment_date", "created_at"]) {
-    assert.match(migration, new RegExp(`\\b${column}\\b`));
-  }
+  assert.match(mongoRoute, /startSession\(\)/);
+  assert.match(mongoRoute, /withTransaction/);
 });

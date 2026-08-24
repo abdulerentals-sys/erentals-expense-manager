@@ -3,4 +3,4 @@ command = "npm run build:netlify"
 
 [build.environment]
 NODE_VERSION = "22.13.0"
-
+MONGODB_DB_NAME = "erentals_expense_manager"

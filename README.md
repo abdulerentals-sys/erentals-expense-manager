@@ -17,9 +17,13 @@ and a standard Next.js deployment on Netlify.
    and runs `npm run build:netlify` automatically.
 3. Keep the project **private** or enable visitor password protection before
    entering customer or financial data.
-4. Start the first deployment. Netlify detects `@netlify/database`, provisions
-   the database, and applies the migration in `netlify/database/migrations/`.
-5. Invoice and receipt uploads are stored in the site-wide
+4. Create a MongoDB Atlas cluster and database user, then add its connection
+   string to Netlify as the private `MONGODB_URI` environment variable. Keep
+   `MONGODB_DB_NAME` as `erentals_expense_manager` unless you want another name.
+5. Start the first deployment. The app creates the `customers`, `persons`,
+   `orders`, `invoices`, `expenses`, and `payments` collections and their
+   indexes automatically on the first request.
+6. Invoice and receipt uploads are stored in the site-wide
    `erentals-documents` Netlify Blobs store. No manual storage key is required
    when the app runs on Netlify.
 
@@ -30,8 +34,8 @@ Existing data in the ChatGPT Sites D1/R2 resources is not copied automatically.
 
 - `npm run build:netlify`: create the production Next.js build used by Netlify
 - `npm run dev:netlify`: run the Netlify-targeted Next.js development server
-- `npx netlify dev`: run locally with Netlify Database and Blobs emulation after
-  the repository has been linked to a Netlify project
+- `npx netlify dev`: run locally with MongoDB and Netlify Blobs after the
+  repository has been linked to a Netlify project and `MONGODB_URI` is set
 
 Netlify's current OpenNext adapter is applied automatically, so this repository
 does not pin the legacy `@netlify/plugin-nextjs` package.
@@ -54,8 +58,8 @@ Scripts that need writable project-scoped home, npm, XDG, and temporary paths us
 - `vite.config.ts` simulates declared bindings for local development
 - `db/index.ts` reads the D1 binding from the Cloudflare Worker environment
 - `db/schema.ts` defines the existing Sites D1 schema
-- `app/api/*/netlify.ts` provides Netlify Database and Blobs storage adapters
-- `netlify/database/migrations/` contains the automatically applied Postgres schema
+- `app/api/records/mongodb.ts` stores every Netlify form record in MongoDB
+- `app/api/upload/netlify.ts` stores invoice and receipt files in Netlify Blobs
 - `examples/d1/` contains an optional D1 example surface
 - `drizzle.config.ts` supports local migration generation when needed
 
