@@ -1,13 +1,40 @@
-# vinext-starter
+# eRentals Expense Manager
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+A full-stack expense, invoice, customer, order, person, payment, and profitability
+dashboard. The same source supports both the existing ChatGPT Sites deployment
+and a standard Next.js deployment on Netlify.
 
 ## Prerequisites
 
 - Node.js `>=22.13.0`
 - Linux with `flock`, `curl`, and GNU `timeout`
+
+## Deploy on Netlify
+
+1. In Netlify, choose **Add new project** and import
+   `github.com/abdulerentals-sys/erentals-expense-manager`.
+2. Select the `main` branch. Netlify reads `netlify.toml`, uses Node.js 22.13,
+   and runs `npm run build:netlify` automatically.
+3. Keep the project **private** or enable visitor password protection before
+   entering customer or financial data.
+4. Start the first deployment. Netlify detects `@netlify/database`, provisions
+   the database, and applies the migration in `netlify/database/migrations/`.
+5. Invoice and receipt uploads are stored in the site-wide
+   `erentals-documents` Netlify Blobs store. No manual storage key is required
+   when the app runs on Netlify.
+
+The first Netlify deployment starts with an empty database and document store.
+Existing data in the ChatGPT Sites D1/R2 resources is not copied automatically.
+
+### Netlify commands
+
+- `npm run build:netlify`: create the production Next.js build used by Netlify
+- `npm run dev:netlify`: run the Netlify-targeted Next.js development server
+- `npx netlify dev`: run locally with Netlify Database and Blobs emulation after
+  the repository has been linked to a Netlify project
+
+Netlify's current OpenNext adapter is applied automatically, so this repository
+does not pin the legacy `@netlify/plugin-nextjs` package.
 
 ## Sites Lifecycle
 
@@ -26,7 +53,9 @@ Scripts that need writable project-scoped home, npm, XDG, and temporary paths us
 - `.openai/hosting.json` declares optional Sites D1 and R2 bindings
 - `vite.config.ts` simulates declared bindings for local development
 - `db/index.ts` reads the D1 binding from the Cloudflare Worker environment
-- `db/schema.ts` starts intentionally empty
+- `db/schema.ts` defines the existing Sites D1 schema
+- `app/api/*/netlify.ts` provides Netlify Database and Blobs storage adapters
+- `netlify/database/migrations/` contains the automatically applied Postgres schema
 - `examples/d1/` contains an optional D1 example surface
 - `drizzle.config.ts` supports local migration generation when needed
 

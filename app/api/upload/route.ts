@@ -15,7 +15,16 @@ function getBucket() {
   return bucket;
 }
 
+function usesNetlifyStorage() {
+  return typeof process !== "undefined" && process.env.NETLIFY === "true";
+}
+
 export async function POST(request: Request) {
+  if (usesNetlifyStorage()) {
+    const netlify = await import("./netlify");
+    return netlify.POST(request);
+  }
+
   try {
     const data = await request.formData();
     const file = data.get("file");
@@ -44,6 +53,11 @@ export async function POST(request: Request) {
 }
 
 export async function GET(request: Request) {
+  if (usesNetlifyStorage()) {
+    const netlify = await import("./netlify");
+    return netlify.GET(request);
+  }
+
   const key = new URL(request.url).searchParams.get("key") ?? "";
   if (!key.startsWith("documents/") || key.includes("..")) {
     return new Response("Invalid document", { status: 400 });

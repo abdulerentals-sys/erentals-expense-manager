@@ -1,8 +1,13 @@
 import type { Metadata } from "next";
 import "./globals.css";
 
+const deploymentUrl =
+  process.env.URL ??
+  process.env.DEPLOY_PRIME_URL ??
+  "https://erentals-expense-manager.aliabdul.chatgpt.site";
+
 export const metadata: Metadata = {
-  metadataBase: new URL("https://erentals-expense-manager.aliabdul.chatgpt.site"),
+  metadataBase: new URL(deploymentUrl),
   title: "eRentals Expense Manager",
   description: "Manage customers, invoices, orders, people, expenses and payments in one connected workspace.",
   openGraph: {

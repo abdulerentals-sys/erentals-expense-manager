@@ -18,7 +18,16 @@ function required(payload: Record<string, unknown>, fields: string[]) {
   return fields.find((field) => !clean(payload[field]));
 }
 
+function usesNetlifyStorage() {
+  return typeof process !== "undefined" && process.env.NETLIFY === "true";
+}
+
 export async function GET() {
+  if (usesNetlifyStorage()) {
+    const netlify = await import("./netlify");
+    return netlify.GET();
+  }
+
   try {
     await ensureSchema();
     const db = getDb();
@@ -49,6 +58,11 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  if (usesNetlifyStorage()) {
+    const netlify = await import("./netlify");
+    return netlify.POST(request);
+  }
+
   try {
     await ensureSchema();
     const body = (await request.json()) as {
