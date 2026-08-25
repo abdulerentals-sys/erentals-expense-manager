@@ -1,4 +1,6 @@
 import { env } from "cloudflare:workers";
+import { canCreateRecord } from "../../auth/permissions";
+import { getSessionUser } from "../../auth/session";
 
 interface UploadBucket {
   put(key: string, body: ArrayBuffer, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
@@ -20,6 +22,19 @@ function usesNetlifyStorage() {
 }
 
 export async function POST(request: Request) {
+  const user = await getSessionUser();
+  if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
+  if (user.mustChangePassword) return Response.json({ error: "Change your temporary password before uploading documents" }, { status: 403 });
+  let kind = "";
+  try {
+    const authorizationData = await request.clone().formData();
+    kind = String(authorizationData.get("kind") ?? "");
+  } catch {
+    return Response.json({ error: "Invalid upload request" }, { status: 400 });
+  }
+  if (!(["invoice", "expense"].includes(kind)) || !canCreateRecord(user.role, kind)) {
+    return Response.json({ error: "Your role cannot upload this document" }, { status: 403 });
+  }
   if (usesNetlifyStorage()) {
     const netlify = await import("./netlify");
     return netlify.POST(request);
@@ -53,6 +68,9 @@ export async function POST(request: Request) {
 }
 
 export async function GET(request: Request) {
+  const user = await getSessionUser();
+  if (!user) return new Response("Authentication required", { status: 401 });
+  if (user.mustChangePassword) return new Response("Change your temporary password first", { status: 403 });
   if (usesNetlifyStorage()) {
     const netlify = await import("./netlify");
     return netlify.GET(request);

@@ -1,7 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { canCreateRecord, canViewSection, roleLabels } from "../auth/permissions";
+import type { PublicUser } from "../auth/types";
 
 type Customer = { id: string; name: string; businessName: string; phone: string; email: string; gstin: string; address: string; openingBalance: number; createdAt: string };
 type Person = { id: string; name: string; role: string; phone: string; email: string; paymentMode: string; status: string; createdAt: string };
@@ -22,6 +26,7 @@ const navItems = [
   { key: "expenses", label: "Expenses", icon: "↗", href: "/expenses" },
   { key: "payments", label: "Payments", icon: "₹", href: "/payments" },
   { key: "reports", label: "Reports", icon: "▥", href: "/reports" },
+  { key: "users", label: "Team access", icon: "♙", href: "/users" },
 ];
 const titles: Record<string, { title: string; eyebrow: string }> = {
   overview: { title: "Business overview", eyebrow: "Your financial command centre" },
@@ -57,7 +62,8 @@ function EmptyState({ title, copy, action, onClick }: { title: string; copy: str
   return <div className="empty-state"><div className="empty-icon">＋</div><h3>{title}</h3><p>{copy}</p><button className="btn btn-primary" onClick={onClick}>{action}</button></div>;
 }
 
-export default function ExpenseDashboard({ initialSection }: { initialSection: string }) {
+export default function ExpenseDashboard({ initialSection, user }: { initialSection: string; user: PublicUser }) {
+  const router = useRouter();
   const [data, setData] = useState<AppData>(emptyData);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState<ModalKind>(null);
@@ -110,14 +116,20 @@ export default function ExpenseDashboard({ initialSection }: { initialSection: s
   }, [data.invoices, data.payments]);
   const filteredCustomers = data.customers.filter((item) => `${item.name} ${item.businessName} ${item.phone}`.toLowerCase().includes(search.toLowerCase()));
   const filteredInvoices = data.invoices.filter((item) => `${item.invoiceNo} ${customerById(item.customerId)?.businessName ?? ""}`.toLowerCase().includes(search.toLowerCase()));
-  const openModal = (kind: Exclude<ModalKind, null>) => { setFormError(""); setFile(null); setModal(kind); };
+  const openModal = (kind: Exclude<ModalKind, null>) => {
+    if (!canCreateRecord(user.role, kind)) {
+      setToast(`${roleLabels[user.role]} access does not include this action`);
+      return;
+    }
+    setFormError(""); setFile(null); setModal(kind);
+  };
 
   const uploadDocument = async () => {
     if (!file) return null;
     const allowedTypes = ["application/pdf", "image/jpeg", "image/png", "image/webp"];
     if (!allowedTypes.includes(file.type)) throw new Error("Choose a PDF, JPG, PNG, or WebP file");
     if (file.size > 10 * 1024 * 1024) throw new Error("The file must be smaller than 10 MB");
-    const form = new FormData(); form.append("file", file);
+    const form = new FormData(); form.append("file", file); form.append("kind", modal ?? "");
     const response = await fetch("/api/upload", { method: "POST", body: form });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || "Document upload failed");
@@ -147,18 +159,23 @@ export default function ExpenseDashboard({ initialSection }: { initialSection: s
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `expense-report-${today()}.csv`; anchor.click(); URL.revokeObjectURL(url);
   };
   const sectionMeta = titles[initialSection] ?? titles.overview;
+  const logout = async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.replace("/login");
+    router.refresh();
+  };
 
   return <div className="app-shell">
     <aside className={`sidebar ${mobileMenu ? "open" : ""}`}>
-      <div className="brand-row"><div className="brand-mark">e</div><div><div className="brand-name">eKhata</div><div className="brand-sub">by eRentals</div></div><button className="icon-btn sidebar-close" onClick={() => setMobileMenu(false)} aria-label="Close menu">×</button></div>
-      <nav className="nav-list" aria-label="Main navigation"><span className="nav-label">Workspace</span>{navItems.map((item) => <Link key={item.key} href={item.href} className={`nav-item ${initialSection === item.key ? "active" : ""}`} onClick={() => setMobileMenu(false)}><span className="nav-icon" aria-hidden="true">{item.icon}</span><span>{item.label}</span>{item.key === "invoices" && totals.outstanding > 0 && <span className="nav-dot" />}</Link>)}</nav>
+      <div className="brand-row"><Image className="sidebar-logo" src="/erentals-logo.png" alt="eRentals" width={92} height={48} priority /><div><div className="brand-name">Expense Manager</div><div className="brand-sub">Team workspace</div></div><button className="icon-btn sidebar-close" onClick={() => setMobileMenu(false)} aria-label="Close menu">×</button></div>
+      <nav className="nav-list" aria-label="Main navigation"><span className="nav-label">{roleLabels[user.role]} workspace</span>{navItems.filter((item) => canViewSection(user.role, item.key)).map((item) => <Link key={item.key} href={item.href} className={`nav-item ${initialSection === item.key ? "active" : ""}`} onClick={() => setMobileMenu(false)}><span className="nav-icon" aria-hidden="true">{item.icon}</span><span>{item.label}</span>{item.key === "invoices" && totals.outstanding > 0 && <span className="nav-dot" />}</Link>)}</nav>
       <div className="sidebar-help"><div className="help-icon">?</div><strong>Need help?</strong><p>Keep every order, bill and expense connected.</p></div>
-      <div className="sidebar-user"><div className="avatar">AA</div><div><strong>Abdul Ali</strong><span>Administrator</span></div><span className="chevron">⌄</span></div>
+      <div className="sidebar-user"><div className="avatar">{initials(user.name)}</div><div><strong>{user.name}</strong><span>{roleLabels[user.role]}</span><div className="user-links"><Link href="/change-password">Password</Link><button type="button" onClick={logout}>Sign out</button></div></div></div>
     </aside>
     <main className="main-area">
-      <header className="topbar"><button className="icon-btn mobile-toggle" onClick={() => setMobileMenu(true)} aria-label="Open menu">☰</button><div className="title-block"><span>{sectionMeta.eyebrow}</span><h1>{sectionMeta.title}</h1></div><div className="topbar-actions"><label className="global-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search records" aria-label="Search records" /></label><button className="icon-btn notification" title="Notifications" aria-label="Notifications">◌<span /></button><button className="btn btn-primary" onClick={() => openModal("expense")} aria-label="Add expense"><span aria-hidden="true">＋</span><span className="desktop-label">Add expense</span></button></div></header>
+      <header className="topbar"><button className="icon-btn mobile-toggle" onClick={() => setMobileMenu(true)} aria-label="Open menu">☰</button><div className="title-block"><span>{sectionMeta.eyebrow}</span><h1>{sectionMeta.title}</h1></div><div className="topbar-actions"><label className="global-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search records" aria-label="Search records" /></label><button className="icon-btn notification" title="Notifications" aria-label="Notifications">◌<span /></button>{canCreateRecord(user.role, "expense") && <button className="btn btn-primary" onClick={() => openModal("expense")} aria-label="Add expense"><span aria-hidden="true">＋</span><span className="desktop-label">Add expense</span></button>}</div></header>
       <div className="content-area">{loading ? <LoadingScreen /> : <>
-        {initialSection === "overview" && <Overview data={data} totals={totals} openModal={openModal} customerById={customerById} orderById={orderById} />}
+        {initialSection === "overview" && <Overview data={data} totals={totals} openModal={openModal} customerById={customerById} orderById={orderById} user={user} />}
         {initialSection === "customers" && <CustomersPage customers={filteredCustomers} customerBalance={customerBalance} openModal={openModal} viewCustomer={setSelectedCustomer} />}
         {initialSection === "invoices" && <InvoicesPage invoices={filteredInvoices} customerById={customerById} personById={personById} openModal={openModal} />}
         {initialSection === "persons" && <PersonsPage persons={data.persons} orders={data.orders} expenses={data.expenses} openModal={openModal} />}
@@ -178,7 +195,7 @@ export default function ExpenseDashboard({ initialSection }: { initialSection: s
 function LoadingScreen() { return <div className="loading-grid"><div className="skeleton sk-wide" />{[1,2,3,4].map((item) => <div key={item} className="skeleton" />)}<div className="skeleton sk-chart" /><div className="skeleton sk-chart" /></div>; }
 function PageHead({ copy, action, secondary }: { copy: string; action?: React.ReactNode; secondary?: React.ReactNode }) { return <div className="page-head"><p>{copy}</p><div className="page-head-actions">{secondary}{action}</div></div>; }
 
-function Overview({ data, totals, openModal, customerById, orderById }: { data: AppData; totals: { invoiced: number; received: number; expenses: number; outstanding: number; profit: number }; openModal: (kind: Exclude<ModalKind, null>) => void; customerById: (id: string) => Customer | undefined; orderById: (id: string) => Order | undefined }) {
+function Overview({ data, totals, openModal, customerById, orderById, user }: { data: AppData; totals: { invoiced: number; received: number; expenses: number; outstanding: number; profit: number }; openModal: (kind: Exclude<ModalKind, null>) => void; customerById: (id: string) => Customer | undefined; orderById: (id: string) => Order | undefined; user: PublicUser }) {
   const bars = Array.from({ length: 6 }, (_, index) => {
     const month = new Date(); month.setDate(1); month.setMonth(month.getMonth() - (5 - index));
     const key = month.toISOString().slice(0, 7);
@@ -191,12 +208,32 @@ function Overview({ data, totals, openModal, customerById, orderById }: { data: 
   const barMax = Math.max(1, ...bars.flatMap((bar) => [bar.received, bar.spent]));
   const dateLabel = new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long" }).format(new Date());
   const recent = [...data.payments.slice(0, 3).map((item) => ({ id: item.id, kind: item.direction === "Received" ? "Received" : "Paid", title: item.direction === "Received" ? customerById(item.customerId)?.businessName || "Customer payment" : item.notes || "Outgoing payment", meta: `${item.method} · ${shortDate(item.paymentDate)}`, amount: item.direction === "Received" ? item.amount : -item.amount })), ...data.expenses.slice(0, 3).map((item) => ({ id: item.id, kind: "Expense", title: item.description || item.category, meta: `${orderById(item.orderId)?.orderNo || "Order"} · ${shortDate(item.expenseDate)}`, amount: -item.amount }))].slice(0, 5);
+  const metricCards = user.role === "supervisor"
+    ? [
+        { label: "Active orders", value: String(data.orders.filter((item) => item.status !== "Completed").length), change: "Jobs requiring execution", icon: "◇", tone: "green" },
+        { label: "People & vendors", value: String(data.persons.length), change: "Available execution contacts", icon: "♧", tone: "blue" },
+        { label: "Execution expenses", value: fmt(totals.expenses), change: "Cost visible to supervisors", icon: "↗", tone: "orange" },
+        { label: "Customers", value: String(data.customers.length), change: "Connected to current orders", icon: "◎", tone: "red" },
+      ]
+    : user.role === "sales"
+      ? [
+          { label: "Sales invoiced", value: fmt(totals.invoiced), change: "Across visible invoices", icon: "▤", tone: "green" },
+          { label: "Outstanding", value: fmt(totals.outstanding), change: "Awaiting customer payment", icon: "!", tone: "red" },
+          { label: "Active orders", value: String(data.orders.filter((item) => item.status !== "Completed").length), change: "Open sales commitments", icon: "◇", tone: "blue" },
+          { label: "Customers", value: String(data.customers.length), change: "Managed customer profiles", icon: "◎", tone: "orange" },
+        ]
+      : [
+          { label: "Total invoiced", value: fmt(totals.invoiced), change: "Across all invoices", icon: "▤", tone: "green" },
+          { label: "Payments received", value: fmt(totals.received), change: `${totals.invoiced ? Math.round((totals.received / totals.invoiced) * 100) : 0}% collection rate`, icon: "↓", tone: "blue" },
+          { label: "Total expenses", value: fmt(totals.expenses), change: "Order execution cost", icon: "↗", tone: "orange" },
+          { label: "Outstanding", value: fmt(totals.outstanding), change: `${data.invoices.filter((item) => item.status === "Overdue").length} overdue invoice`, icon: "!", tone: "red" },
+        ];
   return <div className="section-stack">
-    <section className="welcome-strip"><div><span className="mini-label">{dateLabel}</span><h2>Good evening, Abdul.</h2><p>You have <strong>{data.invoices.filter((item) => item.status !== "Paid").length} invoices</strong> awaiting payment and <strong>{data.orders.filter((item) => item.status !== "Completed").length} active orders</strong>.</p></div><div className="quick-actions"><button onClick={() => openModal("customer")}><span>◎</span><b>New customer</b></button><button onClick={() => openModal("invoice")}><span>▤</span><b>Create invoice</b></button><button onClick={() => openModal("order")}><span>◇</span><b>New order</b></button><button onClick={() => openModal("payment")}><span>₹</span><b>Record payment</b></button></div></section>
-    <section className="metric-grid"><MetricCard label="Total invoiced" value={fmt(totals.invoiced)} change="Across all invoices" icon="▤" tone="green" /><MetricCard label="Payments received" value={fmt(totals.received)} change={`${totals.invoiced ? Math.round((totals.received / totals.invoiced) * 100) : 0}% collection rate`} icon="↓" tone="blue" /><MetricCard label="Total expenses" value={fmt(totals.expenses)} change="Order execution cost" icon="↗" tone="orange" /><MetricCard label="Outstanding" value={fmt(totals.outstanding)} change={`${data.invoices.filter((item) => item.status === "Overdue").length} overdue invoice`} icon="!" tone="red" /></section>
-    <section className="dashboard-grid"><article className="panel cashflow-panel"><div className="panel-head"><div><span className="overline">Cash movement</span><h3>Cash flow</h3></div><div className="legend"><span><i className="green-dot" />Received</span><span><i className="orange-dot" />Spent</span></div></div><div className="bar-chart" aria-label="Six month cash flow chart">{bars.map((bar) => <div className="bar-group" key={bar.label}><div className="bar-pair"><i className="bar received" style={{ height: `${bar.received ? Math.max(5, (bar.received / barMax) * 94) : 0}%` }} /><i className="bar spent" style={{ height: `${bar.spent ? Math.max(5, (bar.spent / barMax) * 94) : 0}%` }} /></div><span>{bar.label}</span></div>)}</div><div className="cashflow-footer"><span>Net cash position</span><strong className={totals.profit >= 0 ? "positive" : "negative"}>{fmt(totals.profit)}</strong></div></article>
-      <article className="panel outstanding-panel"><div className="panel-head"><div><span className="overline">Needs attention</span><h3>Outstanding invoices</h3></div><Link href="/invoices">View all →</Link></div><div className="invoice-list">{data.invoices.filter((item) => item.status !== "Paid").slice(0, 4).map((invoice) => <div className="invoice-list-row" key={invoice.id}><div className="invoice-symbol">{initials(customerById(invoice.customerId)?.businessName || "IN")}</div><div className="grow"><strong>{customerById(invoice.customerId)?.businessName || "Customer"}</strong><span>{invoice.invoiceNo} · Due {shortDate(invoice.dueDate)}</span></div><div className="amount-stack"><strong>{fmt(invoice.total - invoice.paidAmount)}</strong><Status value={invoice.status} /></div></div>)}{!data.invoices.some((item) => item.status !== "Paid") && <div className="mini-empty">You’re all caught up. No invoices are outstanding.</div>}</div></article></section>
-    <section className="panel activity-panel"><div className="panel-head"><div><span className="overline">Latest entries</span><h3>Recent activity</h3></div><Link href="/payments">Open ledger →</Link></div><div className="activity-table">{recent.map((item) => <div className="activity-row" key={`${item.kind}-${item.id}`}><span className={`activity-icon ${item.amount >= 0 ? "in" : "out"}`}>{item.amount >= 0 ? "↓" : "↑"}</span><div className="grow"><strong>{item.title}</strong><span>{item.meta}</span></div><span className="activity-kind">{item.kind}</span><strong className={item.amount >= 0 ? "positive" : "negative"}>{item.amount >= 0 ? "+" : "−"}{fmt(Math.abs(item.amount))}</strong></div>)}{!recent.length && <div className="mini-empty">Your latest payments and expenses will appear here.</div>}</div></section>
+    <section className="welcome-strip"><div><span className="mini-label">{dateLabel} · {roleLabels[user.role]} dashboard</span><h2>Welcome back, {user.name.split(" ")[0]}.</h2><p>You have <strong>{data.invoices.filter((item) => item.status !== "Paid").length} open invoices</strong> and <strong>{data.orders.filter((item) => item.status !== "Completed").length} active orders</strong> visible in your workspace.</p></div><div className="quick-actions">{canCreateRecord(user.role, "customer") && <button onClick={() => openModal("customer")}><span>◎</span><b>New customer</b></button>}{canCreateRecord(user.role, "invoice") && <button onClick={() => openModal("invoice")}><span>▤</span><b>Create invoice</b></button>}{canCreateRecord(user.role, "order") && <button onClick={() => openModal("order")}><span>◇</span><b>New order</b></button>}{canCreateRecord(user.role, "expense") && <button onClick={() => openModal("expense")}><span>↗</span><b>Add expense</b></button>}{canCreateRecord(user.role, "payment") && <button onClick={() => openModal("payment")}><span>₹</span><b>Record payment</b></button>}</div></section>
+    <section className="metric-grid">{metricCards.map((metric) => <MetricCard key={metric.label} {...metric} />)}</section>
+    {(canViewSection(user.role, "payments") || canViewSection(user.role, "invoices")) && <section className="dashboard-grid">{canViewSection(user.role, "payments") && <article className="panel cashflow-panel"><div className="panel-head"><div><span className="overline">Cash movement</span><h3>Cash flow</h3></div><div className="legend"><span><i className="green-dot" />Received</span><span><i className="orange-dot" />Spent</span></div></div><div className="bar-chart" aria-label="Six month cash flow chart">{bars.map((bar) => <div className="bar-group" key={bar.label}><div className="bar-pair"><i className="bar received" style={{ height: `${bar.received ? Math.max(5, (bar.received / barMax) * 94) : 0}%` }} /><i className="bar spent" style={{ height: `${bar.spent ? Math.max(5, (bar.spent / barMax) * 94) : 0}%` }} /></div><span>{bar.label}</span></div>)}</div><div className="cashflow-footer"><span>Net cash position</span><strong className={totals.profit >= 0 ? "positive" : "negative"}>{fmt(totals.profit)}</strong></div></article>}
+      {canViewSection(user.role, "invoices") && <article className="panel outstanding-panel"><div className="panel-head"><div><span className="overline">Needs attention</span><h3>Outstanding invoices</h3></div><Link href="/invoices">View all →</Link></div><div className="invoice-list">{data.invoices.filter((item) => item.status !== "Paid").slice(0, 4).map((invoice) => <div className="invoice-list-row" key={invoice.id}><div className="invoice-symbol">{initials(customerById(invoice.customerId)?.businessName || "IN")}</div><div className="grow"><strong>{customerById(invoice.customerId)?.businessName || "Customer"}</strong><span>{invoice.invoiceNo} · Due {shortDate(invoice.dueDate)}</span></div><div className="amount-stack"><strong>{fmt(invoice.total - invoice.paidAmount)}</strong><Status value={invoice.status} /></div></div>)}{!data.invoices.some((item) => item.status !== "Paid") && <div className="mini-empty">You’re all caught up. No invoices are outstanding.</div>}</div></article>}</section>}
+    {(canViewSection(user.role, "payments") || canViewSection(user.role, "expenses")) && <section className="panel activity-panel"><div className="panel-head"><div><span className="overline">Latest entries</span><h3>Recent activity</h3></div><Link href={canViewSection(user.role, "payments") ? "/payments" : "/expenses"}>Open ledger →</Link></div><div className="activity-table">{recent.map((item) => <div className="activity-row" key={`${item.kind}-${item.id}`}><span className={`activity-icon ${item.amount >= 0 ? "in" : "out"}`}>{item.amount >= 0 ? "↓" : "↑"}</span><div className="grow"><strong>{item.title}</strong><span>{item.meta}</span></div><span className="activity-kind">{item.kind}</span><strong className={item.amount >= 0 ? "positive" : "negative"}>{item.amount >= 0 ? "+" : "−"}{fmt(Math.abs(item.amount))}</strong></div>)}{!recent.length && <div className="mini-empty">Your latest payments and expenses will appear here.</div>}</div></section>}
   </div>;
 }
 

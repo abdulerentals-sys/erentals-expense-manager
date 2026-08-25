@@ -1,4 +1,6 @@
 import { desc, eq } from "drizzle-orm";
+import { canCreateRecord, filterRecordData } from "../../auth/permissions";
+import { getSessionUser } from "../../auth/session";
 import { getDb } from "../../../db";
 import { ensureSchema } from "../../../db/ensure";
 import {
@@ -36,9 +38,15 @@ function usesNetlifyStorage() {
 }
 
 export async function GET() {
+  const user = await getSessionUser();
+  if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
+  if (user.mustChangePassword) return Response.json({ error: "Change your temporary password before using the dashboard" }, { status: 403 });
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.GET();
+    const response = await mongodb.GET();
+    if (!response.ok) return response;
+    const data = await response.json() as Record<string, unknown>;
+    return Response.json(filterRecordData(data, user.role));
   }
 
   try {
@@ -54,14 +62,14 @@ export async function GET() {
         db.select().from(payments).orderBy(desc(payments.createdAt)),
       ]);
 
-    return Response.json({
+    return Response.json(filterRecordData({
       customers: customerRows,
       persons: personRows,
       orders: orderRows,
       invoices: invoiceRows,
       expenses: expenseRows,
       payments: paymentRows,
-    });
+    }, user.role));
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Unable to load records" },
@@ -71,6 +79,19 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const user = await getSessionUser();
+  if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
+  if (user.mustChangePassword) return Response.json({ error: "Change your temporary password before using the dashboard" }, { status: 403 });
+  let requestedType = "";
+  try {
+    const body = await request.clone().json() as { type?: unknown };
+    requestedType = clean(body.type);
+  } catch {
+    return Response.json({ error: "Invalid request" }, { status: 400 });
+  }
+  if (!canCreateRecord(user.role, requestedType)) {
+    return Response.json({ error: "Your role cannot create this record" }, { status: 403 });
+  }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
     return mongodb.POST(request);

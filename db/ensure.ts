@@ -9,6 +9,8 @@ export function ensureSchema() {
     const d1 = env.DB;
     if (!d1) throw new Error("Database storage is unavailable");
     await d1.batch([
+      d1.prepare("CREATE TABLE IF NOT EXISTS users (id text PRIMARY KEY NOT NULL, name text NOT NULL, email text NOT NULL, role text NOT NULL, status text DEFAULT 'Active' NOT NULL, password_hash text NOT NULL, must_change_password integer DEFAULT 1 NOT NULL, created_at text NOT NULL, updated_at text NOT NULL)"),
+      d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (email)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS customers (id text PRIMARY KEY NOT NULL, name text NOT NULL, business_name text NOT NULL, phone text NOT NULL, email text NOT NULL, gstin text NOT NULL, address text NOT NULL, opening_balance integer DEFAULT 0 NOT NULL, created_at text NOT NULL)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS persons (id text PRIMARY KEY NOT NULL, name text NOT NULL, role text NOT NULL, phone text NOT NULL, email text NOT NULL, payment_mode text NOT NULL, status text DEFAULT 'Active' NOT NULL, created_at text NOT NULL)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS orders (id text PRIMARY KEY NOT NULL, order_no text NOT NULL, title text NOT NULL, customer_id text NOT NULL, assigned_person_id text NOT NULL, venue text NOT NULL, event_date text NOT NULL, status text DEFAULT 'Planned' NOT NULL, contract_value integer DEFAULT 0 NOT NULL, created_at text NOT NULL)"),

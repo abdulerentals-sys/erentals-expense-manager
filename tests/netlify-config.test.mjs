@@ -22,6 +22,9 @@ test("Netlify build, MongoDB persistence, and document storage are configured", 
   assert.match(config, /MONGODB_DB_NAME = "erentals_expense_manager"/);
   assert.match(envExample, /^MONGODB_URI=/m);
   assert.match(envExample, /^MONGODB_DB_NAME=erentals_expense_manager$/m);
+  assert.match(envExample, /^AUTH_SECRET=/m);
+  assert.match(envExample, /^ADMIN_EMAIL=/m);
+  assert.match(envExample, /^ADMIN_INITIAL_PASSWORD=/m);
   assert.match(mongoAdapter, /new MongoClient\(uri/);
   assert.match(recordsRoute, /process\.env\.MONGODB_URI/);
   assert.match(uploadRoute, /process\.env\.MONGODB_URI/);

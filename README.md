@@ -20,10 +20,15 @@ and a standard Next.js deployment on Netlify.
 4. Create a MongoDB Atlas cluster and database user, then add its connection
    string to Netlify as the private `MONGODB_URI` environment variable. Keep
    `MONGODB_DB_NAME` as `erentals_expense_manager` unless you want another name.
-5. Start the first deployment. The app creates the `customers`, `persons`,
+5. Add `AUTH_SECRET` as a random value of at least 32 characters. Add
+   `ADMIN_EMAIL` and a strong temporary `ADMIN_INITIAL_PASSWORD` for the first
+   administrator. Store all three as private Netlify environment variables.
+6. Start the first deployment. The app creates the `users`, `customers`, `persons`,
    `orders`, `invoices`, `expenses`, and `payments` collections and their
    indexes automatically on the first request.
-6. Invoice and receipt uploads are stored in the site-wide
+7. Sign in with `ADMIN_EMAIL` and `ADMIN_INITIAL_PASSWORD`. The app immediately
+   requires the administrator to choose a private replacement password.
+8. Invoice and receipt uploads are stored in the site-wide
    `erentals-documents` Netlify Blobs store. No manual storage key is required
    when the app runs on Netlify.
 
@@ -39,6 +44,21 @@ Existing data in the ChatGPT Sites D1/R2 resources is not copied automatically.
 
 Netlify's current OpenNext adapter is applied automatically, so this repository
 does not pin the legacy `@netlify/plugin-nextjs` package.
+
+## Email login and role dashboards
+
+All dashboard pages, data APIs, and document endpoints require a signed,
+HttpOnly session cookie. Passwords are stored as salted PBKDF2 hashes and every
+new account must replace its temporary password at first sign-in.
+
+- **Administrator:** every dashboard plus team account management
+- **Accountant:** customers, invoices, expenses, payments, and reports
+- **Supervisor:** customers, people, orders, and execution expenses
+- **Sales person:** customers, people, orders, and invoices
+
+Administrators create additional accounts from **Team access** in the sidebar.
+Temporary passwords should be shared through a secure channel, never committed
+to the repository or placed in a public issue.
 
 ## Sites Lifecycle
 
