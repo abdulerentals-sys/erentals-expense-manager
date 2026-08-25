@@ -3,11 +3,13 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("Netlify build, MongoDB persistence, and document storage are configured", async () => {
-  const [packageText, config, envExample, mongoAdapter] = await Promise.all([
+  const [packageText, config, envExample, mongoAdapter, recordsRoute, uploadRoute] = await Promise.all([
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../netlify.toml", import.meta.url), "utf8"),
     readFile(new URL("../.env.example", import.meta.url), "utf8"),
     readFile(new URL("../app/api/records/mongodb.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/records/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/upload/route.ts", import.meta.url), "utf8"),
   ]);
   const packageJson = JSON.parse(packageText);
 
@@ -21,6 +23,8 @@ test("Netlify build, MongoDB persistence, and document storage are configured", 
   assert.match(envExample, /^MONGODB_URI=/m);
   assert.match(envExample, /^MONGODB_DB_NAME=erentals_expense_manager$/m);
   assert.match(mongoAdapter, /new MongoClient\(uri/);
+  assert.match(recordsRoute, /process\.env\.MONGODB_URI/);
+  assert.match(uploadRoute, /process\.env\.MONGODB_URI/);
 
   for (const collection of ["customers", "persons", "orders", "invoices", "expenses", "payments"]) {
     assert.match(mongoAdapter, new RegExp(`collection<[^>]+>\\("${collection}"\\)`));
