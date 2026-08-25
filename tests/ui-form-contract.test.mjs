@@ -39,6 +39,8 @@ test("every record form is wired and dated transactions persist their dates", as
     assert.match(route, /Payment amount must be greater than zero/);
   }
 
-  assert.match(mongoRoute, /startSession\(\)/);
-  assert.match(mongoRoute, /withTransaction/);
+  for (const route of [sitesRoute, mongoRoute]) {
+    assert.match(route, /orderId/);
+    assert.match(route, /Select the vendor or payee/);
+  }
 });

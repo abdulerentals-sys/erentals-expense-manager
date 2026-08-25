@@ -86,6 +86,8 @@ export const expenses = sqliteTable("expenses", {
 
 export const payments = sqliteTable("payments", {
   id: text("id").primaryKey(),
+  orderId: text("order_id").notNull().default(""),
+  personId: text("person_id").notNull().default(""),
   invoiceId: text("invoice_id").notNull().default(""),
   customerId: text("customer_id").notNull().default(""),
   direction: text("direction").notNull(),

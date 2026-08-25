@@ -51,10 +51,17 @@ All dashboard pages, data APIs, and document endpoints require a signed,
 HttpOnly session cookie. Passwords are stored as salted PBKDF2 hashes and every
 new account must replace its temporary password at first sign-in.
 
-- **Administrator:** every dashboard plus team account management
-- **Accountant:** customers, invoices, expenses, payments, and reports
+- **Administrator:** every dashboard, order editing, and team account management
+- **Accountant:** customers, invoices, expenses, order-linked customer receipts,
+  vendor payouts, and reports
 - **Supervisor:** customers, people, orders, and execution expenses
-- **Sales person:** customers, people, orders, and invoices
+- **Sales person:** customers, people, orders, invoices, and order-linked customer
+  receipts (vendor payouts are not permitted)
+
+The order dashboard includes a complete chronological history of invoices,
+expenses, customer receipts, and vendor payments. New payments are linked to an
+order ID; the selected order supplies the customer, while outgoing payments also
+require a vendor or payee.
 
 Administrators create additional accounts from **Team access** in the sidebar.
 Temporary passwords should be shared through a secure channel, never committed

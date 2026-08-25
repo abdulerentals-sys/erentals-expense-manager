@@ -2,7 +2,6 @@ import {
   Db,
   MongoClient,
   MongoServerError,
-  type ClientSession,
   type Collection,
   type Filter,
 } from "mongodb";
@@ -83,6 +82,8 @@ type Expense = {
 
 type Payment = {
   id: string;
+  orderId: string;
+  personId: string;
   invoiceId: string;
   customerId: string;
   direction: string;
@@ -178,6 +179,8 @@ function ensureMongoIndexes(collections: Collections) {
       collections.expenses.createIndex({ orderId: 1 }),
       collections.expenses.createIndex({ expenseDate: -1 }),
       collections.payments.createIndex({ customerId: 1 }),
+      collections.payments.createIndex({ orderId: 1 }),
+      collections.payments.createIndex({ personId: 1 }),
       collections.payments.createIndex({ invoiceId: 1 }),
       collections.payments.createIndex({ paymentDate: -1 }),
     ]).then(() => undefined).catch((error) => {
@@ -194,15 +197,14 @@ async function getMongoDatabase() {
   const db = client.db(databaseName);
   const collections = getCollections(db);
   await ensureMongoIndexes(collections);
-  return { client, collections };
+  return { collections };
 }
 
 async function findById<T extends { id: string }>(
   collection: Collection<T>,
   id: string,
-  session?: ClientSession,
 ) {
-  return collection.findOne({ id } as Filter<T>, { projection: { _id: 0 }, session });
+  return collection.findOne({ id } as Filter<T>, { projection: { _id: 0 } });
 }
 
 export async function GET() {
@@ -217,7 +219,13 @@ export async function GET() {
       collections.expenses.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.payments.find({}, options).sort({ createdAt: -1 }).toArray(),
     ]);
-    return Response.json({ customers, persons, orders, invoices, expenses, payments });
+    const orderByInvoice = new Map(invoices.map((invoice) => [invoice.id, invoice.orderId]));
+    const normalizedPayments = payments.map((payment) => ({
+      ...payment,
+      orderId: payment.orderId || orderByInvoice.get(payment.invoiceId) || "",
+      personId: payment.personId || "",
+    }));
+    return Response.json({ customers, persons, orders, invoices, expenses, payments: normalizedPayments });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Unable to load records" },
@@ -231,7 +239,7 @@ export async function POST(request: Request) {
     const body = (await request.json()) as { type?: string; payload?: Payload };
     const type = clean(body.type);
     const payload = body.payload ?? {};
-    const { client, collections } = await getMongoDatabase();
+    const { collections } = await getMongoDatabase();
     const createdAt = now();
 
     if (type === "customer") {
@@ -416,7 +424,7 @@ export async function POST(request: Request) {
     }
 
     if (type === "payment") {
-      const missing = required(payload, ["direction", "amount", "paymentDate", "method"]);
+      const missing = required(payload, ["direction", "orderId", "amount", "paymentDate", "method"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       if (invalidDate(payload, ["paymentDate"])) {
         return Response.json({ error: "Enter a valid payment date" }, { status: 400 });
@@ -430,13 +438,23 @@ export async function POST(request: Request) {
         return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
       }
 
-      const invoiceId = clean(payload.invoiceId);
-      const requestedCustomerId = clean(payload.customerId);
-      const session = client.startSession();
+      const orderId = clean(payload.orderId);
+      const personId = direction === "Paid" ? clean(payload.personId) : "";
+      const linkedOrder = await findById(collections.orders, orderId);
+      if (!linkedOrder) throw new FormError("Select a valid order");
+      if (direction === "Paid" && !personId) {
+        throw new FormError("Select the vendor or payee");
+      }
+      if (personId) {
+        const person = await findById(collections.persons, personId);
+        if (!person) throw new FormError("Select a valid vendor or payee");
+      }
       const row: Payment = {
         id: crypto.randomUUID(),
-        invoiceId,
-        customerId: requestedCustomerId,
+        orderId,
+        personId,
+        invoiceId: "",
+        customerId: linkedOrder.customerId,
         direction,
         amount,
         paymentDate: clean(payload.paymentDate),
@@ -445,43 +463,7 @@ export async function POST(request: Request) {
         notes: clean(payload.notes),
         createdAt,
       };
-
-      try {
-        await session.withTransaction(async () => {
-          const linkedInvoice = invoiceId
-            ? await findById(collections.invoices, invoiceId, session)
-            : null;
-          if (invoiceId && !linkedInvoice) throw new FormError("Select a valid invoice");
-          if (linkedInvoice && direction !== "Received") {
-            throw new FormError("Only received payments can be linked to a sales invoice");
-          }
-          if (linkedInvoice) row.customerId = linkedInvoice.customerId;
-
-          if (row.customerId) {
-            const customer = await findById(collections.customers, row.customerId, session);
-            if (!customer) throw new FormError("Select a valid customer");
-          }
-          if (direction === "Received" && !row.customerId) {
-            throw new FormError("Select a customer or invoice for money received");
-          }
-          if (linkedInvoice && amount > linkedInvoice.total - linkedInvoice.paidAmount) {
-            throw new FormError("Payment is greater than the invoice balance");
-          }
-
-          await collections.payments.insertOne(row, { session });
-          if (linkedInvoice) {
-            const paidAmount = linkedInvoice.paidAmount + amount;
-            const status = paidAmount >= linkedInvoice.total ? "Paid" : "Part paid";
-            await collections.invoices.updateOne(
-              { id: linkedInvoice.id },
-              { $set: { paidAmount, status } },
-              { session },
-            );
-          }
-        });
-      } finally {
-        await session.endSession();
-      }
+      await collections.payments.insertOne(row);
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -494,6 +476,57 @@ export async function POST(request: Request) {
         : message;
     const status = error instanceof FormError ? 400 : 500;
     return Response.json({ error: friendly }, { status });
+  }
+}
+
+export async function PATCH(request: Request) {
+  try {
+    const body = (await request.json()) as { type?: string; id?: string; payload?: Payload };
+    const type = clean(body.type);
+    const id = clean(body.id);
+    const payload = body.payload ?? {};
+    if (type !== "order" || !id) {
+      return Response.json({ error: "Select a valid order to edit" }, { status: 400 });
+    }
+    const missing = required(payload, ["orderNo", "title", "customerId", "assignedPersonId", "eventDate"]);
+    if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+    if (invalidDate(payload, ["eventDate"])) {
+      return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
+    }
+
+    const { collections } = await getMongoDatabase();
+    const customerId = clean(payload.customerId);
+    const assignedPersonId = clean(payload.assignedPersonId);
+    const [existingOrder, customer, assignedPerson] = await Promise.all([
+      findById(collections.orders, id),
+      findById(collections.customers, customerId),
+      findById(collections.persons, assignedPersonId),
+    ]);
+    if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
+    if (!customer) throw new FormError("Select a valid customer");
+    if (!assignedPerson) throw new FormError("Select a valid execution lead");
+    const contractValue = money(payload.contractValue);
+    if (!contractValue) throw new FormError("Order value must be greater than zero");
+
+    const updates = {
+      orderNo: clean(payload.orderNo),
+      title: clean(payload.title),
+      customerId,
+      assignedPersonId,
+      venue: clean(payload.venue),
+      eventDate: clean(payload.eventDate),
+      status: clean(payload.status) || "Planned",
+      contractValue,
+    };
+    await collections.orders.updateOne({ id }, { $set: updates });
+    return Response.json({ record: { ...existingOrder, ...updates } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to update order";
+    const friendly =
+      error instanceof MongoServerError && error.code === 11000
+        ? "That order number already exists"
+        : message;
+    return Response.json({ error: friendly }, { status: error instanceof FormError ? 400 : 500 });
   }
 }
 

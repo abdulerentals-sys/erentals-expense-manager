@@ -1,5 +1,5 @@
 import { desc, eq } from "drizzle-orm";
-import { canCreateRecord, filterRecordData } from "../../auth/permissions";
+import { canCreateRecord, canRecordPayment, filterRecordData } from "../../auth/permissions";
 import { getSessionUser } from "../../auth/session";
 import { getDb } from "../../../db";
 import { ensureSchema } from "../../../db/ensure";
@@ -62,13 +62,20 @@ export async function GET() {
         db.select().from(payments).orderBy(desc(payments.createdAt)),
       ]);
 
+    const orderByInvoice = new Map(invoiceRows.map((invoice) => [invoice.id, invoice.orderId]));
+    const normalizedPayments = paymentRows.map((payment) => ({
+      ...payment,
+      orderId: payment.orderId || orderByInvoice.get(payment.invoiceId) || "",
+      personId: payment.personId || "",
+    }));
+
     return Response.json(filterRecordData({
       customers: customerRows,
       persons: personRows,
       orders: orderRows,
       invoices: invoiceRows,
       expenses: expenseRows,
-      payments: paymentRows,
+      payments: normalizedPayments,
     }, user.role));
   } catch (error) {
     return Response.json(
@@ -83,14 +90,19 @@ export async function POST(request: Request) {
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
   if (user.mustChangePassword) return Response.json({ error: "Change your temporary password before using the dashboard" }, { status: 403 });
   let requestedType = "";
+  let requestedDirection = "";
   try {
-    const body = await request.clone().json() as { type?: unknown };
+    const body = await request.clone().json() as { type?: unknown; payload?: Record<string, unknown> };
     requestedType = clean(body.type);
+    requestedDirection = clean(body.payload?.direction);
   } catch {
     return Response.json({ error: "Invalid request" }, { status: 400 });
   }
   if (!canCreateRecord(user.role, requestedType)) {
     return Response.json({ error: "Your role cannot create this record" }, { status: 403 });
+  }
+  if (requestedType === "payment" && !canRecordPayment(user.role, requestedDirection)) {
+    return Response.json({ error: "Your role cannot record this payment type" }, { status: 403 });
   }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
@@ -264,7 +276,7 @@ export async function POST(request: Request) {
     }
 
     if (type === "payment") {
-      const missing = required(payload, ["direction", "amount", "paymentDate", "method"]);
+      const missing = required(payload, ["direction", "orderId", "amount", "paymentDate", "method"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       if (invalidDate(payload, ["paymentDate"])) {
         return Response.json({ error: "Enter a valid payment date" }, { status: 400 });
@@ -273,33 +285,25 @@ export async function POST(request: Request) {
       if (!["Received", "Paid"].includes(direction)) {
         return Response.json({ error: "Select a valid payment type" }, { status: 400 });
       }
-      const invoiceId = clean(payload.invoiceId);
-      let customerId = clean(payload.customerId);
-      let linkedInvoice: typeof invoices.$inferSelect | undefined;
-      if (invoiceId) {
-        [linkedInvoice] = await db.select().from(invoices).where(eq(invoices.id, invoiceId)).limit(1);
-        if (!linkedInvoice) return Response.json({ error: "Select a valid invoice" }, { status: 400 });
-        if (direction !== "Received") {
-          return Response.json({ error: "Only received payments can be linked to a sales invoice" }, { status: 400 });
-        }
-        customerId = linkedInvoice.customerId;
+      const orderId = clean(payload.orderId);
+      const personId = direction === "Paid" ? clean(payload.personId) : "";
+      const [linkedOrder] = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+      if (!linkedOrder) return Response.json({ error: "Select a valid order" }, { status: 400 });
+      if (direction === "Paid" && !personId) {
+        return Response.json({ error: "Select the vendor or payee" }, { status: 400 });
       }
-      if (customerId) {
-        const [customer] = await db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1);
-        if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
-      }
-      if (direction === "Received" && !customerId) {
-        return Response.json({ error: "Select a customer or invoice for money received" }, { status: 400 });
+      if (personId) {
+        const [person] = await db.select({ id: persons.id }).from(persons).where(eq(persons.id, personId)).limit(1);
+        if (!person) return Response.json({ error: "Select a valid vendor or payee" }, { status: 400 });
       }
       const amount = money(payload.amount);
       if (!amount) return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
-      if (linkedInvoice && amount > linkedInvoice.total - linkedInvoice.paidAmount) {
-        return Response.json({ error: "Payment is greater than the invoice balance" }, { status: 400 });
-      }
       const row = {
         id: crypto.randomUUID(),
-        invoiceId,
-        customerId,
+        orderId,
+        personId,
+        invoiceId: "",
+        customerId: linkedOrder.customerId,
         direction,
         amount,
         paymentDate: clean(payload.paymentDate),
@@ -309,12 +313,6 @@ export async function POST(request: Request) {
         createdAt,
       };
       await db.insert(payments).values(row);
-
-      if (linkedInvoice) {
-        const paidAmount = linkedInvoice.paidAmount + row.amount;
-        const status = paidAmount >= linkedInvoice.total ? "Paid" : "Part paid";
-        await db.update(invoices).set({ paidAmount, status }).where(eq(invoices.id, linkedInvoice.id));
-      }
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -322,6 +320,72 @@ export async function POST(request: Request) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to save record";
     const friendly = message.includes("UNIQUE") ? "That reference number already exists" : message;
+    return Response.json({ error: friendly }, { status: 500 });
+  }
+}
+
+export async function PATCH(request: Request) {
+  const user = await getSessionUser();
+  if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
+  if (user.mustChangePassword) {
+    return Response.json({ error: "Change your temporary password before using the dashboard" }, { status: 403 });
+  }
+  if (user.role !== "admin") {
+    return Response.json({ error: "Only an administrator can edit orders" }, { status: 403 });
+  }
+  if (usesNetlifyStorage()) {
+    const mongodb = await import("./mongodb");
+    return mongodb.PATCH(request);
+  }
+
+  try {
+    await ensureSchema();
+    const body = (await request.json()) as {
+      type?: string;
+      id?: string;
+      payload?: Record<string, unknown>;
+    };
+    const type = clean(body.type);
+    const id = clean(body.id);
+    const payload = body.payload ?? {};
+    if (type !== "order" || !id) {
+      return Response.json({ error: "Select a valid order to edit" }, { status: 400 });
+    }
+    const missing = required(payload, ["orderNo", "title", "customerId", "assignedPersonId", "eventDate"]);
+    if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+    if (invalidDate(payload, ["eventDate"])) {
+      return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
+    }
+
+    const db = getDb();
+    const customerId = clean(payload.customerId);
+    const assignedPersonId = clean(payload.assignedPersonId);
+    const [[existingOrder], [customer], [assignedPerson]] = await Promise.all([
+      db.select().from(orders).where(eq(orders.id, id)).limit(1),
+      db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1),
+      db.select({ id: persons.id }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
+    ]);
+    if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
+    if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
+    if (!assignedPerson) return Response.json({ error: "Select a valid execution lead" }, { status: 400 });
+    const contractValue = money(payload.contractValue);
+    if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
+
+    const updates = {
+      orderNo: clean(payload.orderNo),
+      title: clean(payload.title),
+      customerId,
+      assignedPersonId,
+      venue: clean(payload.venue),
+      eventDate: clean(payload.eventDate),
+      status: clean(payload.status) || "Planned",
+      contractValue,
+    };
+    await db.update(orders).set(updates).where(eq(orders.id, id));
+    return Response.json({ record: { ...existingOrder, ...updates } });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to update order";
+    const friendly = message.includes("UNIQUE") ? "That order number already exists" : message;
     return Response.json({ error: friendly }, { status: 500 });
   }
 }

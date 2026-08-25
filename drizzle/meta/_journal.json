@@ -15,6 +15,13 @@
       "when": 1787645857580,
       "tag": "0001_parallel_squadron_supreme",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787657999330,
+      "tag": "0002_tired_eternals",
+      "breakpoints": true
     }
   ]
 }
