@@ -32,7 +32,7 @@ function invalidDate(payload: Record<string, unknown>, fields: string[]) {
 }
 
 function usesNetlifyStorage() {
-  return typeof process !== "undefined" && process.env.NETLIFY === "true";
+  return typeof process !== "undefined" && Boolean(process.env.MONGODB_URI?.trim());
 }
 
 export async function GET() {
