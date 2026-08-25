@@ -37,6 +37,12 @@ test("roles protect record writes and expose an admin user workspace", async () 
 });
 
 test("the official eRentals logo is used in the authenticated dashboard", async () => {
-  const dashboard = await read("app/components/ExpenseDashboard.tsx");
+  const [dashboard, passwordPage] = await Promise.all([
+    read("app/components/ExpenseDashboard.tsx"),
+    read("app/components/ChangePasswordForm.tsx"),
+  ]);
   assert.match(dashboard, /\/erentals-logo\.png/);
+  assert.match(dashboard, /\/api\/auth\/logout/);
+  assert.match(passwordPage, /\/api\/auth\/logout/);
+  assert.match(passwordPage, />Sign out</);
 });
