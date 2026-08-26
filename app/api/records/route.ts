@@ -442,12 +442,20 @@ export async function POST(request: Request) {
         return Response.json({ error: "Select a valid payment type" }, { status: 400 });
       }
       const personId = "";
+      const customerId = direction === "Received" ? clean(payload.customerId) : "";
       const vendorId = direction === "Paid" ? clean(payload.vendorId) : "";
       const allocations = paymentAllocations(payload);
       if (!allocations.length) return Response.json({ error: "Select at least one order and enter its allocation" }, { status: 400 });
       if (new Set(allocations.map((item) => item.orderId)).size !== allocations.length) return Response.json({ error: "Each order can only be selected once" }, { status: 400 });
+      if (direction === "Received" && !customerId) {
+        return Response.json({ error: "Select the customer" }, { status: 400 });
+      }
       if (direction === "Paid" && !vendorId) {
         return Response.json({ error: "Select the vendor or payee" }, { status: 400 });
+      }
+      if (customerId) {
+        const [customer] = await db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1);
+        if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
       }
       if (vendorId) {
         const [vendor] = await db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1);
@@ -461,7 +469,7 @@ export async function POST(request: Request) {
         return order;
       }));
       if (linkedOrders.some((order) => !order)) return Response.json({ error: "Select valid orders" }, { status: 400 });
-      if (direction === "Received" && new Set(linkedOrders.map((order) => order!.customerId)).size > 1) return Response.json({ error: "Customer receipts can only cover orders for the same customer" }, { status: 400 });
+      if (direction === "Received" && linkedOrders.some((order) => order!.customerId !== customerId)) return Response.json({ error: "Customer receipts can only use orders belonging to the selected customer" }, { status: 400 });
       if (direction === "Paid") {
         const assigned = await Promise.all(allocations.map(async (allocation) => {
           const rows = await db.select({ vendorId: orderVendors.vendorId }).from(orderVendors).where(eq(orderVendors.orderId, allocation.orderId));
@@ -470,7 +478,7 @@ export async function POST(request: Request) {
         if (assigned.some((value) => !value)) return Response.json({ error: "Vendor is not assigned to every selected order" }, { status: 400 });
       }
       const rows = allocations.map((allocation, index) => ({
-        id: crypto.randomUUID(), orderId: allocation.orderId, personId, vendorId, invoiceId: "", customerId: linkedOrders[index]!.customerId, direction, amount: allocation.amount,
+        id: crypto.randomUUID(), orderId: allocation.orderId, personId, vendorId, invoiceId: "", customerId: direction === "Received" ? customerId : linkedOrders[index]!.customerId, direction, amount: allocation.amount,
         paymentDate: clean(payload.paymentDate), method: clean(payload.method), reference: clean(payload.reference), notes: clean(payload.notes), createdAt,
       }));
       await db.insert(payments).values(rows);

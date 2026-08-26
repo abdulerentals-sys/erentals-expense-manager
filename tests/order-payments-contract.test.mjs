@@ -59,3 +59,22 @@ test("accountants can allocate one payment across multiple orders", async () => 
   assert.match(sitesRoute, /Allocation total must equal the payment amount/);
   assert.match(mongoRoute, /insertMany/);
 });
+
+test("payment records require the party that matches the payment direction", async () => {
+  const [dashboard, sitesRoute, mongoRoute] = await Promise.all([
+    read("app/components/ExpenseDashboard.tsx"),
+    read("app/api/records/route.ts"),
+    read("app/api/records/mongodb.ts"),
+  ]);
+
+  assert.match(dashboard, /paymentDirection === "Received"[\s\S]*label="Customer \*"[\s\S]*name="customerId"/);
+  assert.match(dashboard, /paymentDirection === "Paid"[\s\S]*label="Vendor \/ payee \*"[\s\S]*name="vendorId"/);
+  assert.match(dashboard, /eligiblePaymentOrders/);
+  assert.match(dashboard, /vendorById\(payment\.vendorId\)\?\.name/);
+  for (const source of [sitesRoute, mongoRoute]) {
+    assert.match(source, /Select the customer/);
+    assert.match(source, /orders belonging to the selected customer/);
+    assert.match(source, /Select the vendor or payee/);
+    assert.match(source, /Vendor is not assigned to every selected order/);
+  }
+});
