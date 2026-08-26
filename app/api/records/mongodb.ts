@@ -117,6 +117,19 @@ const clean = (value: unknown) => String(value ?? "").trim();
 const money = (value: unknown) => Math.max(0, Math.round(Number(value) || 0));
 
 type PaymentAllocation = { orderId: string; amount: number };
+type VendorAssignmentInput = { vendorId: string; productName: string; amount: number; notes: string };
+
+function vendorAssignments(payload: Payload): VendorAssignmentInput[] {
+  let raw: unknown = payload.vendorAssignments;
+  if (typeof raw === "string" && raw.trim()) {
+    try { raw = JSON.parse(raw); } catch { return []; }
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    const row = item as Payload;
+    return { vendorId: clean(row.vendorId), productName: clean(row.productName), amount: money(row.amount), notes: clean(row.notes) };
+  }).filter((item) => item.vendorId || item.productName || item.amount);
+}
 
 function paymentAllocations(payload: Payload): PaymentAllocation[] {
   let raw: unknown = payload.allocations;
@@ -349,7 +362,13 @@ export async function POST(request: Request) {
         contractValue,
         createdAt,
       };
+      const assignments = vendorAssignments(payload);
+      if (assignments.some((item) => !item.vendorId || !item.productName || !item.amount)) throw new FormError("Complete the vendor, product and amount for every assignment");
+      const uniqueVendorIds = [...new Set(assignments.map((item) => item.vendorId))];
+      const validVendorCount = uniqueVendorIds.length ? await collections.vendors.countDocuments({ id: { $in: uniqueVendorIds } }) : 0;
+      if (validVendorCount !== uniqueVendorIds.length) throw new FormError("Select valid vendors for the order");
       await collections.orders.insertOne(row);
+      if (assignments.length) await collections.orderVendors.insertMany(assignments.map((assignment) => ({ id: crypto.randomUUID(), orderId: row.id, ...assignment, createdAt })));
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -506,6 +525,10 @@ export async function POST(request: Request) {
       const linkedOrders = await Promise.all(allocations.map((allocation) => findById(collections.orders, allocation.orderId)));
       if (linkedOrders.some((order) => !order)) throw new FormError("Select valid orders");
       if (direction === "Received" && new Set(linkedOrders.map((order) => order!.customerId)).size > 1) throw new FormError("Customer receipts can only cover orders for the same customer");
+      if (direction === "Paid") {
+        const assignedOrderIds = await collections.orderVendors.distinct("orderId", { orderId: { $in: allocations.map((item) => item.orderId) }, vendorId });
+        if (assignedOrderIds.length !== allocations.length) throw new FormError("Vendor is not assigned to every selected order");
+      }
       const rows: Payment[] = allocations.map((allocation, index) => ({
         id: crypto.randomUUID(), orderId: allocation.orderId, personId, vendorId, invoiceId: "", customerId: linkedOrders[index]!.customerId, direction, amount: allocation.amount,
         paymentDate: clean(payload.paymentDate), method: clean(payload.method), reference: clean(payload.reference), notes: clean(payload.notes), createdAt,

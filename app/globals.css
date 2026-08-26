@@ -263,6 +263,9 @@ button:disabled { cursor: wait; opacity: .68; }
 .vendor-assignments > small { display: block; margin-bottom: 7px; color: var(--muted); font-weight: 700; }
 .vendor-assignments > div { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: .84rem; }
 .vendor-assignments > div + div { border-top: 1px solid var(--line); }
+.order-vendor-builder { gap: 10px; border-top: 1px solid var(--line); padding-top: 16px; }
+.order-vendor-draft { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(150px, 1.2fr) minmax(110px, .6fr) 40px; gap: 8px; align-items: center; }
+.order-vendor-draft .icon-btn { width: 40px; height: 40px; color: var(--danger); }
 
 @media (max-width: 1180px) {
   .metric-grid { grid-template-columns: repeat(2, 1fr); }.person-grid, .order-grid { grid-template-columns: repeat(2, 1fr); }.global-search { display: none; }
@@ -284,4 +287,6 @@ button:disabled { cursor: wait; opacity: .68; }
   .transaction-summary { grid-template-columns: 1fr 1fr; }
   .transaction-item { align-items: flex-start; }
   .transaction-item > strong { min-width: 76px; }
+  .order-vendor-draft { grid-template-columns: 1fr; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+  .order-vendor-draft .icon-btn { justify-self: end; }
 }

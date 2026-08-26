@@ -26,12 +26,26 @@ test("orders support multiple vendor product assignments", async () => {
   ]);
   assert.match(dashboard, /kind === "orderVendor"/);
   assert.match(dashboard, /name="productName"/);
+  assert.match(dashboard, /name="vendorAssignments"/);
+  assert.match(dashboard, /Add another vendor/);
   assert.match(dashboard, /Assign vendor/);
   assert.match(schema, /export const orderVendors/);
   for (const source of [route, mongo]) {
     assert.match(source, /type === "orderVendor"/);
     assert.match(source, /vendorId/);
     assert.match(source, /productName/);
+  }
+});
+
+test("vendor payouts are limited to vendors assigned to every selected order", async () => {
+  const [dashboard, route, mongo] = await Promise.all([
+    read("app/components/ExpenseDashboard.tsx"), read("app/api/records/route.ts"),
+    read("app/api/records/mongodb.ts"),
+  ]);
+  assert.match(dashboard, /eligiblePaymentVendors/);
+  assert.match(dashboard, /assigned to the selected order/);
+  for (const source of [route, mongo]) {
+    assert.match(source, /Vendor is not assigned to every selected order/);
   }
 });
 
