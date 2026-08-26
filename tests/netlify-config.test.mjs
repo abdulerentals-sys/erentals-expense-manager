@@ -31,7 +31,7 @@ test("Netlify build, MongoDB persistence, and document storage are configured", 
 
   for (const collection of ["customers", "persons", "orders", "invoices", "expenses", "payments"]) {
     assert.match(mongoAdapter, new RegExp(`collection<[^>]+>\\("${collection}"\\)`));
-    assert.match(mongoAdapter, new RegExp(`collections\\.${collection}\\.insertOne\\(`));
+    assert.match(mongoAdapter, new RegExp(`collections\\.${collection}\\.insert(?:One|Many)\\(`));
   }
 
   for (const reference of ["orderNo", "invoiceNo", "expenseNo"]) {

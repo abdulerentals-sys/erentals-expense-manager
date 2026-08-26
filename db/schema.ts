@@ -35,6 +35,19 @@ export const persons = sqliteTable("persons", {
   createdAt: text("created_at").notNull(),
 });
 
+export const vendors = sqliteTable("vendors", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  contactPerson: text("contact_person").notNull().default(""),
+  phone: text("phone").notNull(),
+  email: text("email").notNull().default(""),
+  gstin: text("gstin").notNull().default(""),
+  address: text("address").notNull().default(""),
+  paymentMode: text("payment_mode").notNull().default("Bank transfer"),
+  status: text("status").notNull().default("Active"),
+  createdAt: text("created_at").notNull(),
+});
+
 export const orders = sqliteTable("orders", {
   id: text("id").primaryKey(),
   orderNo: text("order_no").notNull().unique(),
@@ -45,6 +58,16 @@ export const orders = sqliteTable("orders", {
   eventDate: text("event_date").notNull(),
   status: text("status").notNull().default("Planned"),
   contractValue: integer("contract_value").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+});
+
+export const orderVendors = sqliteTable("order_vendors", {
+  id: text("id").primaryKey(),
+  orderId: text("order_id").notNull(),
+  vendorId: text("vendor_id").notNull(),
+  productName: text("product_name").notNull(),
+  amount: integer("amount").notNull(),
+  notes: text("notes").notNull().default(""),
   createdAt: text("created_at").notNull(),
 });
 
@@ -75,6 +98,7 @@ export const expenses = sqliteTable("expenses", {
   personId: text("person_id").notNull(),
   category: text("category").notNull(),
   vendor: text("vendor").notNull(),
+  vendorId: text("vendor_id").notNull().default(""),
   description: text("description").notNull(),
   expenseDate: text("expense_date").notNull(),
   amount: integer("amount").notNull(),
@@ -88,6 +112,7 @@ export const payments = sqliteTable("payments", {
   id: text("id").primaryKey(),
   orderId: text("order_id").notNull().default(""),
   personId: text("person_id").notNull().default(""),
+  vendorId: text("vendor_id").notNull().default(""),
   invoiceId: text("invoice_id").notNull().default(""),
   customerId: text("customer_id").notNull().default(""),
   direction: text("direction").notNull(),

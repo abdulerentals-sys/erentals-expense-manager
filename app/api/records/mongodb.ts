@@ -31,6 +31,8 @@ type Person = {
   createdAt: string;
 };
 
+type Vendor = { id: string; name: string; contactPerson: string; phone: string; email: string; gstin: string; address: string; paymentMode: string; status: string; createdAt: string };
+
 type Order = {
   id: string;
   orderNo: string;
@@ -43,6 +45,8 @@ type Order = {
   contractValue: number;
   createdAt: string;
 };
+
+type OrderVendor = { id: string; orderId: string; vendorId: string; productName: string; amount: number; notes: string; createdAt: string };
 
 type Invoice = {
   id: string;
@@ -71,6 +75,7 @@ type Expense = {
   personId: string;
   category: string;
   vendor: string;
+  vendorId: string;
   description: string;
   expenseDate: string;
   amount: number;
@@ -84,6 +89,7 @@ type Payment = {
   id: string;
   orderId: string;
   personId: string;
+  vendorId: string;
   invoiceId: string;
   customerId: string;
   direction: string;
@@ -98,7 +104,9 @@ type Payment = {
 type Collections = {
   customers: Collection<Customer>;
   persons: Collection<Person>;
+  vendors: Collection<Vendor>;
   orders: Collection<Order>;
+  orderVendors: Collection<OrderVendor>;
   invoices: Collection<Invoice>;
   expenses: Collection<Expense>;
   payments: Collection<Payment>;
@@ -107,6 +115,21 @@ type Collections = {
 const now = () => new Date().toISOString();
 const clean = (value: unknown) => String(value ?? "").trim();
 const money = (value: unknown) => Math.max(0, Math.round(Number(value) || 0));
+
+type PaymentAllocation = { orderId: string; amount: number };
+
+function paymentAllocations(payload: Payload): PaymentAllocation[] {
+  let raw: unknown = payload.allocations;
+  if (typeof raw === "string" && raw.trim()) {
+    try { raw = JSON.parse(raw); } catch { return []; }
+  }
+  if (Array.isArray(raw)) {
+    return raw.map((item) => ({ orderId: clean((item as Payload).orderId), amount: money((item as Payload).amount) })).filter((item) => item.orderId && item.amount);
+  }
+  const orderId = clean(payload.orderId);
+  const amount = money(payload.amount);
+  return orderId && amount ? [{ orderId, amount }] : [];
+}
 
 let mongoClientPromise: Promise<MongoClient> | null = null;
 let mongoIndexesPromise: Promise<void> | null = null;
@@ -157,7 +180,9 @@ function getCollections(db: Db): Collections {
   return {
     customers: db.collection<Customer>("customers"),
     persons: db.collection<Person>("persons"),
+    vendors: db.collection<Vendor>("vendors"),
     orders: db.collection<Order>("orders"),
+    orderVendors: db.collection<OrderVendor>("order_vendors"),
     invoices: db.collection<Invoice>("invoices"),
     expenses: db.collection<Expense>("expenses"),
     payments: db.collection<Payment>("payments"),
@@ -169,8 +194,11 @@ function ensureMongoIndexes(collections: Collections) {
     mongoIndexesPromise = Promise.all([
       collections.customers.createIndex({ createdAt: -1 }),
       collections.persons.createIndex({ createdAt: -1 }),
+      collections.vendors.createIndex({ name: 1 }),
       collections.orders.createIndex({ orderNo: 1 }, { unique: true }),
       collections.orders.createIndex({ customerId: 1 }),
+      collections.orderVendors.createIndex({ orderId: 1 }),
+      collections.orderVendors.createIndex({ vendorId: 1 }),
       collections.invoices.createIndex({ invoiceNo: 1 }, { unique: true }),
       collections.invoices.createIndex({ customerId: 1 }),
       collections.invoices.createIndex({ orderId: 1 }),
@@ -181,6 +209,7 @@ function ensureMongoIndexes(collections: Collections) {
       collections.payments.createIndex({ customerId: 1 }),
       collections.payments.createIndex({ orderId: 1 }),
       collections.payments.createIndex({ personId: 1 }),
+      collections.payments.createIndex({ vendorId: 1 }),
       collections.payments.createIndex({ invoiceId: 1 }),
       collections.payments.createIndex({ paymentDate: -1 }),
     ]).then(() => undefined).catch((error) => {
@@ -211,10 +240,12 @@ export async function GET() {
   try {
     const { collections } = await getMongoDatabase();
     const options = { projection: { _id: 0 } };
-    const [customers, persons, orders, invoices, expenses, payments] = await Promise.all([
+    const [customers, persons, vendors, orders, orderVendors, invoices, expenses, payments] = await Promise.all([
       collections.customers.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.persons.find({}, options).sort({ createdAt: -1 }).toArray(),
+      collections.vendors.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.orders.find({}, options).sort({ createdAt: -1 }).toArray(),
+      collections.orderVendors.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.invoices.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.expenses.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.payments.find({}, options).sort({ createdAt: -1 }).toArray(),
@@ -224,8 +255,9 @@ export async function GET() {
       ...payment,
       orderId: payment.orderId || orderByInvoice.get(payment.invoiceId) || "",
       personId: payment.personId || "",
+      vendorId: payment.vendorId || "",
     }));
-    return Response.json({ customers, persons, orders, invoices, expenses, payments: normalizedPayments });
+    return Response.json({ customers, persons, vendors, orders, orderVendors, invoices, expenses, payments: normalizedPayments });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Unable to load records" },
@@ -277,6 +309,14 @@ export async function POST(request: Request) {
       return Response.json({ record: row }, { status: 201 });
     }
 
+    if (type === "vendor") {
+      const missing = required(payload, ["name", "phone"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      const row: Vendor = { id: crypto.randomUUID(), name: clean(payload.name), contactPerson: clean(payload.contactPerson), phone: clean(payload.phone), email: clean(payload.email), gstin: clean(payload.gstin), address: clean(payload.address), paymentMode: clean(payload.paymentMode) || "Bank transfer", status: "Active", createdAt };
+      await collections.vendors.insertOne(row);
+      return Response.json({ record: row }, { status: 201 });
+    }
+
     if (type === "order") {
       const missing = required(payload, ["title", "customerId", "assignedPersonId", "eventDate"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
@@ -310,6 +350,18 @@ export async function POST(request: Request) {
         createdAt,
       };
       await collections.orders.insertOne(row);
+      return Response.json({ record: row }, { status: 201 });
+    }
+
+    if (type === "orderVendor") {
+      const missing = required(payload, ["orderId", "vendorId", "productName", "amount"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      const orderId = clean(payload.orderId); const vendorId = clean(payload.vendorId);
+      const [order, vendor] = await Promise.all([findById(collections.orders, orderId), findById(collections.vendors, vendorId)]);
+      if (!order) throw new FormError("Select a valid order"); if (!vendor) throw new FormError("Select a valid vendor");
+      const amount = money(payload.amount); if (!amount) throw new FormError("Vendor amount must be greater than zero");
+      const row: OrderVendor = { id: crypto.randomUUID(), orderId, vendorId, productName: clean(payload.productName), amount, notes: clean(payload.notes), createdAt };
+      await collections.orderVendors.insertOne(row);
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -392,6 +444,7 @@ export async function POST(request: Request) {
       }
       const orderId = clean(payload.orderId);
       const personId = clean(payload.personId);
+      const vendorId = clean(payload.vendorId);
       const [order, person] = await Promise.all([
         findById(collections.orders, orderId),
         findById(collections.persons, personId),
@@ -400,6 +453,7 @@ export async function POST(request: Request) {
       if (!person) {
         return Response.json({ error: "Select a valid responsible person" }, { status: 400 });
       }
+      if (vendorId && !await findById(collections.vendors, vendorId)) throw new FormError("Select a valid vendor");
       const amount = money(payload.amount);
       if (!amount) {
         return Response.json({ error: "Expense amount must be greater than zero" }, { status: 400 });
@@ -411,6 +465,7 @@ export async function POST(request: Request) {
         personId,
         category: clean(payload.category),
         vendor: clean(payload.vendor),
+        vendorId,
         description: clean(payload.description),
         expenseDate: clean(payload.expenseDate),
         amount,
@@ -424,7 +479,7 @@ export async function POST(request: Request) {
     }
 
     if (type === "payment") {
-      const missing = required(payload, ["direction", "orderId", "amount", "paymentDate", "method"]);
+      const missing = required(payload, ["direction", "amount", "paymentDate", "method"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       if (invalidDate(payload, ["paymentDate"])) {
         return Response.json({ error: "Enter a valid payment date" }, { status: 400 });
@@ -438,33 +493,25 @@ export async function POST(request: Request) {
         return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
       }
 
-      const orderId = clean(payload.orderId);
-      const personId = direction === "Paid" ? clean(payload.personId) : "";
-      const linkedOrder = await findById(collections.orders, orderId);
-      if (!linkedOrder) throw new FormError("Select a valid order");
-      if (direction === "Paid" && !personId) {
+      const personId = "";
+      const vendorId = direction === "Paid" ? clean(payload.vendorId) : "";
+      const allocations = paymentAllocations(payload);
+      if (!allocations.length) throw new FormError("Select at least one order and enter its allocation");
+      if (new Set(allocations.map((item) => item.orderId)).size !== allocations.length) throw new FormError("Each order can only be selected once");
+      if (direction === "Paid" && !vendorId) {
         throw new FormError("Select the vendor or payee");
       }
-      if (personId) {
-        const person = await findById(collections.persons, personId);
-        if (!person) throw new FormError("Select a valid vendor or payee");
-      }
-      const row: Payment = {
-        id: crypto.randomUUID(),
-        orderId,
-        personId,
-        invoiceId: "",
-        customerId: linkedOrder.customerId,
-        direction,
-        amount,
-        paymentDate: clean(payload.paymentDate),
-        method: clean(payload.method),
-        reference: clean(payload.reference),
-        notes: clean(payload.notes),
-        createdAt,
-      };
-      await collections.payments.insertOne(row);
-      return Response.json({ record: row }, { status: 201 });
+      if (vendorId && !await findById(collections.vendors, vendorId)) throw new FormError("Select a valid vendor or payee");
+      if (allocations.reduce((sum, item) => sum + item.amount, 0) !== amount) throw new FormError("Allocation total must equal the payment amount");
+      const linkedOrders = await Promise.all(allocations.map((allocation) => findById(collections.orders, allocation.orderId)));
+      if (linkedOrders.some((order) => !order)) throw new FormError("Select valid orders");
+      if (direction === "Received" && new Set(linkedOrders.map((order) => order!.customerId)).size > 1) throw new FormError("Customer receipts can only cover orders for the same customer");
+      const rows: Payment[] = allocations.map((allocation, index) => ({
+        id: crypto.randomUUID(), orderId: allocation.orderId, personId, vendorId, invoiceId: "", customerId: linkedOrders[index]!.customerId, direction, amount: allocation.amount,
+        paymentDate: clean(payload.paymentDate), method: clean(payload.method), reference: clean(payload.reference), notes: clean(payload.notes), createdAt,
+      }));
+      await collections.payments.insertMany(rows);
+      return Response.json({ records: rows }, { status: 201 });
     }
 
     return Response.json({ error: "Unsupported record type" }, { status: 400 });

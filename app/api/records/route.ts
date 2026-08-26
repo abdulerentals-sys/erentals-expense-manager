@@ -7,14 +7,31 @@ import {
   customers,
   expenses,
   invoices,
+  orderVendors,
   orders,
   payments,
   persons,
+  vendors,
 } from "../../../db/schema";
 
 const now = () => new Date().toISOString();
 const clean = (value: unknown) => String(value ?? "").trim();
 const money = (value: unknown) => Math.max(0, Math.round(Number(value) || 0));
+
+type PaymentAllocation = { orderId: string; amount: number };
+
+function paymentAllocations(payload: Record<string, unknown>): PaymentAllocation[] {
+  let raw: unknown = payload.allocations;
+  if (typeof raw === "string" && raw.trim()) {
+    try { raw = JSON.parse(raw); } catch { return []; }
+  }
+  if (Array.isArray(raw)) {
+    return raw.map((item) => ({ orderId: clean((item as Record<string, unknown>).orderId), amount: money((item as Record<string, unknown>).amount) })).filter((item) => item.orderId && item.amount);
+  }
+  const orderId = clean(payload.orderId);
+  const amount = money(payload.amount);
+  return orderId && amount ? [{ orderId, amount }] : [];
+}
 
 function required(payload: Record<string, unknown>, fields: string[]) {
   return fields.find((field) => !clean(payload[field]));
@@ -52,11 +69,13 @@ export async function GET() {
   try {
     await ensureSchema();
     const db = getDb();
-    const [customerRows, personRows, orderRows, invoiceRows, expenseRows, paymentRows] =
+    const [customerRows, personRows, vendorRows, orderRows, orderVendorRows, invoiceRows, expenseRows, paymentRows] =
       await Promise.all([
         db.select().from(customers).orderBy(desc(customers.createdAt)),
         db.select().from(persons).orderBy(desc(persons.createdAt)),
+        db.select().from(vendors).orderBy(desc(vendors.createdAt)),
         db.select().from(orders).orderBy(desc(orders.createdAt)),
+        db.select().from(orderVendors).orderBy(desc(orderVendors.createdAt)),
         db.select().from(invoices).orderBy(desc(invoices.createdAt)),
         db.select().from(expenses).orderBy(desc(expenses.createdAt)),
         db.select().from(payments).orderBy(desc(payments.createdAt)),
@@ -67,12 +86,15 @@ export async function GET() {
       ...payment,
       orderId: payment.orderId || orderByInvoice.get(payment.invoiceId) || "",
       personId: payment.personId || "",
+      vendorId: payment.vendorId || "",
     }));
 
     return Response.json(filterRecordData({
       customers: customerRows,
       persons: personRows,
+      vendors: vendorRows,
       orders: orderRows,
+      orderVendors: orderVendorRows,
       invoices: invoiceRows,
       expenses: expenseRows,
       payments: normalizedPayments,
@@ -91,10 +113,12 @@ export async function POST(request: Request) {
   if (user.mustChangePassword) return Response.json({ error: "Change your temporary password before using the dashboard" }, { status: 403 });
   let requestedType = "";
   let requestedDirection = "";
+  let requestedAllocationCount = 0;
   try {
     const body = await request.clone().json() as { type?: unknown; payload?: Record<string, unknown> };
     requestedType = clean(body.type);
     requestedDirection = clean(body.payload?.direction);
+    requestedAllocationCount = paymentAllocations(body.payload ?? {}).length;
   } catch {
     return Response.json({ error: "Invalid request" }, { status: 400 });
   }
@@ -103,6 +127,9 @@ export async function POST(request: Request) {
   }
   if (requestedType === "payment" && !canRecordPayment(user.role, requestedDirection)) {
     return Response.json({ error: "Your role cannot record this payment type" }, { status: 403 });
+  }
+  if (requestedType === "payment" && requestedAllocationCount > 1 && !["admin", "accountant"].includes(user.role)) {
+    return Response.json({ error: "Only accountants and administrators can select multiple orders" }, { status: 403 });
   }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
@@ -155,6 +182,14 @@ export async function POST(request: Request) {
       return Response.json({ record: row }, { status: 201 });
     }
 
+    if (type === "vendor") {
+      const missing = required(payload, ["name", "phone"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      const row = { id: crypto.randomUUID(), name: clean(payload.name), contactPerson: clean(payload.contactPerson), phone: clean(payload.phone), email: clean(payload.email), gstin: clean(payload.gstin), address: clean(payload.address), paymentMode: clean(payload.paymentMode) || "Bank transfer", status: "Active", createdAt };
+      await db.insert(vendors).values(row);
+      return Response.json({ record: row }, { status: 201 });
+    }
+
     if (type === "order") {
       const missing = required(payload, ["title", "customerId", "assignedPersonId", "eventDate"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
@@ -184,6 +219,22 @@ export async function POST(request: Request) {
         createdAt,
       };
       await db.insert(orders).values(row);
+      return Response.json({ record: row }, { status: 201 });
+    }
+
+    if (type === "orderVendor") {
+      const missing = required(payload, ["orderId", "vendorId", "productName", "amount"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      const orderId = clean(payload.orderId); const vendorId = clean(payload.vendorId);
+      const [[order], [vendor]] = await Promise.all([
+        db.select({ id: orders.id }).from(orders).where(eq(orders.id, orderId)).limit(1),
+        db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1),
+      ]);
+      if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
+      if (!vendor) return Response.json({ error: "Select a valid vendor" }, { status: 400 });
+      const amount = money(payload.amount); if (!amount) return Response.json({ error: "Vendor amount must be greater than zero" }, { status: 400 });
+      const row = { id: crypto.randomUUID(), orderId, vendorId, productName: clean(payload.productName), amount, notes: clean(payload.notes), createdAt };
+      await db.insert(orderVendors).values(row);
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -248,12 +299,17 @@ export async function POST(request: Request) {
       }
       const orderId = clean(payload.orderId);
       const personId = clean(payload.personId);
+      const vendorId = clean(payload.vendorId);
       const [[order], [person]] = await Promise.all([
         db.select({ id: orders.id }).from(orders).where(eq(orders.id, orderId)).limit(1),
         db.select({ id: persons.id }).from(persons).where(eq(persons.id, personId)).limit(1),
       ]);
       if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
       if (!person) return Response.json({ error: "Select a valid responsible person" }, { status: 400 });
+      if (vendorId) {
+        const [vendor] = await db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1);
+        if (!vendor) return Response.json({ error: "Select a valid vendor" }, { status: 400 });
+      }
       const amount = money(payload.amount);
       if (!amount) return Response.json({ error: "Expense amount must be greater than zero" }, { status: 400 });
       const row = {
@@ -263,6 +319,7 @@ export async function POST(request: Request) {
         personId,
         category: clean(payload.category),
         vendor: clean(payload.vendor),
+        vendorId,
         description: clean(payload.description),
         expenseDate: clean(payload.expenseDate),
         amount,
@@ -276,7 +333,7 @@ export async function POST(request: Request) {
     }
 
     if (type === "payment") {
-      const missing = required(payload, ["direction", "orderId", "amount", "paymentDate", "method"]);
+      const missing = required(payload, ["direction", "amount", "paymentDate", "method"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       if (invalidDate(payload, ["paymentDate"])) {
         return Response.json({ error: "Enter a valid payment date" }, { status: 400 });
@@ -285,35 +342,33 @@ export async function POST(request: Request) {
       if (!["Received", "Paid"].includes(direction)) {
         return Response.json({ error: "Select a valid payment type" }, { status: 400 });
       }
-      const orderId = clean(payload.orderId);
-      const personId = direction === "Paid" ? clean(payload.personId) : "";
-      const [linkedOrder] = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
-      if (!linkedOrder) return Response.json({ error: "Select a valid order" }, { status: 400 });
-      if (direction === "Paid" && !personId) {
+      const personId = "";
+      const vendorId = direction === "Paid" ? clean(payload.vendorId) : "";
+      const allocations = paymentAllocations(payload);
+      if (!allocations.length) return Response.json({ error: "Select at least one order and enter its allocation" }, { status: 400 });
+      if (new Set(allocations.map((item) => item.orderId)).size !== allocations.length) return Response.json({ error: "Each order can only be selected once" }, { status: 400 });
+      if (direction === "Paid" && !vendorId) {
         return Response.json({ error: "Select the vendor or payee" }, { status: 400 });
       }
-      if (personId) {
-        const [person] = await db.select({ id: persons.id }).from(persons).where(eq(persons.id, personId)).limit(1);
-        if (!person) return Response.json({ error: "Select a valid vendor or payee" }, { status: 400 });
+      if (vendorId) {
+        const [vendor] = await db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1);
+        if (!vendor) return Response.json({ error: "Select a valid vendor or payee" }, { status: 400 });
       }
       const amount = money(payload.amount);
       if (!amount) return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
-      const row = {
-        id: crypto.randomUUID(),
-        orderId,
-        personId,
-        invoiceId: "",
-        customerId: linkedOrder.customerId,
-        direction,
-        amount,
-        paymentDate: clean(payload.paymentDate),
-        method: clean(payload.method),
-        reference: clean(payload.reference),
-        notes: clean(payload.notes),
-        createdAt,
-      };
-      await db.insert(payments).values(row);
-      return Response.json({ record: row }, { status: 201 });
+      if (allocations.reduce((sum, item) => sum + item.amount, 0) !== amount) return Response.json({ error: "Allocation total must equal the payment amount" }, { status: 400 });
+      const linkedOrders = await Promise.all(allocations.map(async (allocation) => {
+        const [order] = await db.select().from(orders).where(eq(orders.id, allocation.orderId)).limit(1);
+        return order;
+      }));
+      if (linkedOrders.some((order) => !order)) return Response.json({ error: "Select valid orders" }, { status: 400 });
+      if (direction === "Received" && new Set(linkedOrders.map((order) => order!.customerId)).size > 1) return Response.json({ error: "Customer receipts can only cover orders for the same customer" }, { status: 400 });
+      const rows = allocations.map((allocation, index) => ({
+        id: crypto.randomUUID(), orderId: allocation.orderId, personId, vendorId, invoiceId: "", customerId: linkedOrders[index]!.customerId, direction, amount: allocation.amount,
+        paymentDate: clean(payload.paymentDate), method: clean(payload.method), reference: clean(payload.reference), notes: clean(payload.notes), createdAt,
+      }));
+      await db.insert(payments).values(rows);
+      return Response.json({ records: rows }, { status: 201 });
     }
 
     return Response.json({ error: "Unsupported record type" }, { status: 400 });

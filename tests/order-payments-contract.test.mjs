@@ -13,7 +13,7 @@ test("payments are linked to orders and identify the vendor when money is paid",
   ]);
 
   assert.match(dashboard, /kind === "payment"[\s\S]*name="orderId"/);
-  assert.match(dashboard, /kind === "payment"[\s\S]*name="personId"/);
+  assert.match(dashboard, /kind === "payment"[\s\S]*name="vendorId"/);
   assert.doesNotMatch(dashboard, /name="invoiceId"/);
   for (const source of [schema, sitesRoute, mongoRoute]) {
     assert.match(source, /orderId/);
@@ -43,4 +43,19 @@ test("each order exposes a combined transaction history", async () => {
   assert.match(dashboard, /Vendor payment/);
   assert.match(dashboard, /Order expense/);
   assert.match(dashboard, /Invoice issued/);
+});
+
+test("accountants can allocate one payment across multiple orders", async () => {
+  const [dashboard, sitesRoute, mongoRoute] = await Promise.all([
+    read("app/components/ExpenseDashboard.tsx"),
+    read("app/api/records/route.ts"),
+    read("app/api/records/mongodb.ts"),
+  ]);
+
+  assert.match(dashboard, /paymentAllocations/);
+  assert.match(dashboard, /name="allocations"/);
+  assert.match(dashboard, /Allocate payment across orders/);
+  assert.match(sitesRoute, /Only accountants and administrators can select multiple orders/);
+  assert.match(sitesRoute, /Allocation total must equal the payment amount/);
+  assert.match(mongoRoute, /insertMany/);
 });

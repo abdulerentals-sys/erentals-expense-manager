@@ -5,13 +5,14 @@ export type DashboardSection =
   | "customers"
   | "invoices"
   | "persons"
+  | "vendors"
   | "orders"
   | "expenses"
   | "payments"
   | "reports"
   | "users";
 
-export type RecordType = "customer" | "person" | "order" | "invoice" | "expense" | "payment";
+export type RecordType = "customer" | "person" | "vendor" | "order" | "orderVendor" | "invoice" | "expense" | "payment";
 export type PaymentDirection = "Received" | "Paid";
 
 export const roleLabels: Record<UserRole, string> = {
@@ -29,15 +30,15 @@ export const roleDescriptions: Record<UserRole, string> = {
 };
 
 const sectionsByRole: Record<UserRole, DashboardSection[]> = {
-  admin: ["overview", "customers", "invoices", "persons", "orders", "expenses", "payments", "reports", "users"],
-  accountant: ["overview", "customers", "invoices", "expenses", "payments", "reports"],
+  admin: ["overview", "customers", "invoices", "persons", "vendors", "orders", "expenses", "payments", "reports", "users"],
+  accountant: ["overview", "customers", "invoices", "vendors", "orders", "expenses", "payments", "reports"],
   supervisor: ["overview", "customers", "persons", "orders", "expenses"],
   sales: ["overview", "customers", "persons", "orders", "invoices", "payments"],
 };
 
 const recordsByRole: Record<UserRole, RecordType[]> = {
-  admin: ["customer", "person", "order", "invoice", "expense", "payment"],
-  accountant: ["customer", "invoice", "expense", "payment"],
+  admin: ["customer", "person", "vendor", "order", "orderVendor", "invoice", "expense", "payment"],
+  accountant: ["customer", "vendor", "orderVendor", "invoice", "expense", "payment"],
   supervisor: ["customer", "person", "order", "expense"],
   sales: ["customer", "person", "order", "invoice", "payment"],
 };
@@ -62,7 +63,7 @@ export function visibleSections(role: UserRole) {
 
 export function filterRecordData<T extends Record<string, unknown>>(data: T, role: UserRole): T {
   if (role === "admin" || role === "accountant") return data;
-  const hidden = role === "supervisor" ? ["invoices", "payments"] : ["expenses"];
+  const hidden = role === "supervisor" ? ["invoices", "payments", "vendors", "orderVendors"] : ["expenses", "vendors", "orderVendors"];
   return Object.fromEntries(
     Object.entries(data).map(([key, value]) => {
       if (hidden.includes(key)) return [key, []];
