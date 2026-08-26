@@ -6,6 +6,7 @@ import {
   type Filter,
 } from "mongodb";
 import { findUserByEmail } from "../../auth/store";
+import { calculateTentativeCost, type PricingBasis } from "../../vendor-pricing";
 
 type Payload = Record<string, unknown>;
 type RequestContext = { userRole: string; userEmail: string };
@@ -35,6 +36,7 @@ type Person = {
 };
 
 type Vendor = { id: string; name: string; contactPerson: string; phone: string; email: string; gstin: string; address: string; paymentMode: string; status: string; createdAt: string };
+type VendorProduct = { id: string; vendorId: string; name: string; pricingBasis: PricingBasis; rentalCharge: number; status: string; createdAt: string };
 
 type Order = {
   id: string;
@@ -50,7 +52,7 @@ type Order = {
   createdAt: string;
 };
 
-type OrderVendor = { id: string; orderId: string; vendorId: string; productName: string; amount: number; notes: string; createdAt: string };
+type OrderVendor = { id: string; orderId: string; vendorId: string; productId: string; productName: string; pricingBasis: PricingBasis; unitRate: number; quantity: number; rentalDays: number; amount: number; notes: string; createdAt: string };
 
 type Invoice = {
   id: string;
@@ -109,6 +111,7 @@ type Collections = {
   customers: Collection<Customer>;
   persons: Collection<Person>;
   vendors: Collection<Vendor>;
+  vendorProducts: Collection<VendorProduct>;
   orders: Collection<Order>;
   orderVendors: Collection<OrderVendor>;
   invoices: Collection<Invoice>;
@@ -119,6 +122,7 @@ type Collections = {
 const now = () => new Date().toISOString();
 const clean = (value: unknown) => String(value ?? "").trim();
 const money = (value: unknown) => Math.max(0, Math.round(Number(value) || 0));
+const positiveInteger = (value: unknown) => Math.max(1, Math.round(Number(value) || 1));
 
 type PaymentAllocation = { orderId: string; amount: number };
 type VendorAssignmentInput = { vendorId: string; productName: string; amount: number; notes: string };
@@ -207,6 +211,7 @@ function getCollections(db: Db): Collections {
     customers: db.collection<Customer>("customers"),
     persons: db.collection<Person>("persons"),
     vendors: db.collection<Vendor>("vendors"),
+    vendorProducts: db.collection<VendorProduct>("vendor_products"),
     orders: db.collection<Order>("orders"),
     orderVendors: db.collection<OrderVendor>("order_vendors"),
     invoices: db.collection<Invoice>("invoices"),
@@ -221,6 +226,7 @@ function ensureMongoIndexes(collections: Collections) {
       collections.customers.createIndex({ createdAt: -1 }),
       collections.persons.createIndex({ createdAt: -1 }),
       collections.vendors.createIndex({ name: 1 }),
+      collections.vendorProducts.createIndex({ vendorId: 1, name: 1 }, { unique: true }),
       collections.orders.createIndex({ orderNo: 1 }, { unique: true }),
       collections.orders.createIndex({ customerId: 1 }),
       collections.orderVendors.createIndex({ orderId: 1 }),
@@ -266,10 +272,11 @@ export async function GET() {
   try {
     const { collections } = await getMongoDatabase();
     const options = { projection: { _id: 0 } };
-    const [customers, persons, vendors, orders, orderVendors, invoices, expenses, payments] = await Promise.all([
+    const [customers, persons, vendors, vendorProducts, orders, orderVendors, invoices, expenses, payments] = await Promise.all([
       collections.customers.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.persons.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.vendors.find({}, options).sort({ createdAt: -1 }).toArray(),
+      collections.vendorProducts.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.orders.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.orderVendors.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.invoices.find({}, options).sort({ createdAt: -1 }).toArray(),
@@ -283,7 +290,7 @@ export async function GET() {
       personId: payment.personId || "",
       vendorId: payment.vendorId || "",
     }));
-    return Response.json({ customers, persons, vendors, orders, orderVendors, invoices, expenses, payments: normalizedPayments });
+    return Response.json({ customers, persons, vendors, vendorProducts, orders, orderVendors, invoices, expenses, payments: normalizedPayments });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Unable to load records" },
@@ -353,6 +360,21 @@ export async function POST(request: Request, context: RequestContext = { userRol
       return Response.json({ record: row }, { status: 201 });
     }
 
+    if (type === "vendorProduct") {
+      const missing = required(payload, ["vendorId", "name", "pricingBasis", "rentalCharge"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      const vendorId = clean(payload.vendorId);
+      const pricingBasis = clean(payload.pricingBasis);
+      const rentalCharge = money(payload.rentalCharge);
+      const vendor = await findById(collections.vendors, vendorId);
+      if (!vendor) throw new FormError("Select a valid vendor");
+      if (!["Per day", "Per event"].includes(pricingBasis)) throw new FormError("Select per-day or per-event pricing");
+      if (!rentalCharge) throw new FormError("Rental charge must be greater than zero");
+      const row: VendorProduct = { id: crypto.randomUUID(), vendorId, name: clean(payload.name), pricingBasis: pricingBasis as PricingBasis, rentalCharge, status: "Active", createdAt };
+      await collections.vendorProducts.insertOne(row);
+      return Response.json({ record: row }, { status: 201 });
+    }
+
     if (type === "order") {
       const missing = required(payload, ["customerId", "salespersonId", "assignedPersonId", "eventDate"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
@@ -399,33 +421,40 @@ export async function POST(request: Request, context: RequestContext = { userRol
       const validVendorCount = uniqueVendorIds.length ? await collections.vendors.countDocuments({ id: { $in: uniqueVendorIds } }) : 0;
       if (validVendorCount !== uniqueVendorIds.length) throw new FormError("Select valid vendors for the order");
       await collections.orders.insertOne(row);
-      if (assignments.length) await collections.orderVendors.insertMany(assignments.map((assignment) => ({ id: crypto.randomUUID(), orderId: row.id, ...assignment, createdAt })));
+      if (assignments.length) await collections.orderVendors.insertMany(assignments.map((assignment) => ({ id: crypto.randomUUID(), orderId: row.id, productId: "", pricingBasis: "Per event" as const, unitRate: assignment.amount, quantity: 1, rentalDays: 1, ...assignment, createdAt })));
       return Response.json({ record: row }, { status: 201 });
     }
 
     if (type === "orderVendor") {
-      const missing = required(payload, userRole === "supervisor" ? ["orderId", "vendorId", "productName"] : ["orderId", "vendorId", "productName", "amount"]);
+      const missing = required(payload, ["orderId", "vendorId", "productId", "quantity"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
-      const orderId = clean(payload.orderId); const vendorId = clean(payload.vendorId);
-      const [order, vendor] = await Promise.all([findById(collections.orders, orderId), findById(collections.vendors, vendorId)]);
+      const orderId = clean(payload.orderId); const vendorId = clean(payload.vendorId); const productId = clean(payload.productId);
+      const [order, vendor, product] = await Promise.all([findById(collections.orders, orderId), findById(collections.vendors, vendorId), findById(collections.vendorProducts, productId)]);
       if (!order) throw new FormError("Select a valid order"); if (!vendor) throw new FormError("Select a valid vendor");
+      if (!product || product.vendorId !== vendorId) throw new FormError("Select a product listed by this vendor");
       if (userRole === "supervisor") {
         const supervisorPerson = await collections.persons.findOne({ email: userEmail }, { collation: { locale: "en", strength: 2 } });
         if (!supervisorPerson) throw new FormError("Supervisor profile is not linked to a Person record");
         const ownedOrder = await collections.orders.findOne({ id: orderId, assignedPersonId: supervisorPerson.id, status: { $nin: ["Completed", "Cancelled"] } });
         if (!ownedOrder) throw new FormError("Supervisor actions require an active assigned order");
       }
-      const amount = userRole === "supervisor" ? 0 : money(payload.amount); if (userRole !== "supervisor" && !amount) throw new FormError("Vendor amount must be greater than zero");
-      const productName = clean(payload.productName);
-      const existing = await collections.orderVendors.findOne({ orderId, vendorId, productName });
+      const quantity = positiveInteger(payload.quantity);
+      const rentalDays = product.pricingBasis === "Per day" ? positiveInteger(payload.rentalDays) : 1;
+      const calculatedAmount = calculateTentativeCost(product.rentalCharge, product.pricingBasis, quantity, rentalDays);
+      const requestedAmount = money(payload.amount);
+      const amount = userRole === "supervisor" ? calculatedAmount : requestedAmount || calculatedAmount;
+      const productName = product.name;
+      const assignment = { productId, productName, pricingBasis: product.pricingBasis, unitRate: product.rentalCharge, quantity, rentalDays, amount, notes: clean(payload.notes) };
+      const existing = await collections.orderVendors.findOne({ orderId, productId });
       if (existing && userRole !== "supervisor") {
-        await collections.orderVendors.updateOne({ id: existing.id }, { $set: { amount, notes: clean(payload.notes) } });
-        return Response.json({ record: { ...existing, amount, notes: clean(payload.notes) } });
+        await collections.orderVendors.updateOne({ id: existing.id }, { $set: assignment });
+        return Response.json({ record: { ...existing, ...assignment } });
       }
-      if (existing) return Response.json({ record: { ...existing, amount: 0 } });
-      const row: OrderVendor = { id: crypto.randomUUID(), orderId, vendorId, productName, amount: userRole === "supervisor" ? 0 : amount, notes: clean(payload.notes), createdAt };
+      if (existing) return Response.json({ record: { ...existing, amount: 0, unitRate: 0 } });
+      const row: OrderVendor = { id: crypto.randomUUID(), orderId, vendorId, ...assignment, createdAt };
       await collections.orderVendors.insertOne(row);
-      return Response.json({ record: row }, { status: 201 });
+      const visibleRow = userRole === "supervisor" ? { ...row, amount: 0, unitRate: 0 } : row;
+      return Response.json({ record: visibleRow }, { status: 201 });
     }
 
     if (type === "invoice") {

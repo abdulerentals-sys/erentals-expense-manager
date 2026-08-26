@@ -49,6 +49,16 @@ export const vendors = sqliteTable("vendors", {
   createdAt: text("created_at").notNull(),
 });
 
+export const vendorProducts = sqliteTable("vendor_products", {
+  id: text("id").primaryKey(),
+  vendorId: text("vendor_id").notNull(),
+  name: text("name").notNull(),
+  pricingBasis: text("pricing_basis").notNull(),
+  rentalCharge: integer("rental_charge").notNull(),
+  status: text("status").notNull().default("Active"),
+  createdAt: text("created_at").notNull(),
+});
+
 export const orders = sqliteTable("orders", {
   id: text("id").primaryKey(),
   orderNo: text("order_no").notNull().unique(),
@@ -67,7 +77,12 @@ export const orderVendors = sqliteTable("order_vendors", {
   id: text("id").primaryKey(),
   orderId: text("order_id").notNull(),
   vendorId: text("vendor_id").notNull(),
+  productId: text("product_id").notNull().default(""),
   productName: text("product_name").notNull(),
+  pricingBasis: text("pricing_basis").notNull().default("Per event"),
+  unitRate: integer("unit_rate").notNull().default(0),
+  quantity: integer("quantity").notNull().default(1),
+  rentalDays: integer("rental_days").notNull().default(1),
   amount: integer("amount").notNull(),
   notes: text("notes").notNull().default(""),
   createdAt: text("created_at").notNull(),

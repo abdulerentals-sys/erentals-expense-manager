@@ -2,6 +2,7 @@ import { and, desc, eq, ne, sql } from "drizzle-orm";
 import { canCreateRecord, canRecordPayment, filterRecordData } from "../../auth/permissions";
 import { getSessionUser } from "../../auth/session";
 import { findUserByEmail } from "../../auth/store";
+import { calculateTentativeCost, type PricingBasis } from "../../vendor-pricing";
 import { getDb } from "../../../db";
 import { ensureSchema } from "../../../db/ensure";
 import {
@@ -12,12 +13,14 @@ import {
   orders,
   payments,
   persons,
+  vendorProducts,
   vendors,
 } from "../../../db/schema";
 
 const now = () => new Date().toISOString();
 const clean = (value: unknown) => String(value ?? "").trim();
 const money = (value: unknown) => Math.max(0, Math.round(Number(value) || 0));
+const positiveInteger = (value: unknown) => Math.max(1, Math.round(Number(value) || 1));
 
 type PaymentAllocation = { orderId: string; amount: number };
 type VendorAssignmentInput = { vendorId: string; productName: string; amount: number; notes: string };
@@ -92,11 +95,12 @@ export async function GET() {
   try {
     await ensureSchema();
     const db = getDb();
-    const [customerRows, personRows, vendorRows, orderRows, orderVendorRows, invoiceRows, expenseRows, paymentRows] =
+    const [customerRows, personRows, vendorRows, vendorProductRows, orderRows, orderVendorRows, invoiceRows, expenseRows, paymentRows] =
       await Promise.all([
         db.select().from(customers).orderBy(desc(customers.createdAt)),
         db.select().from(persons).orderBy(desc(persons.createdAt)),
         db.select().from(vendors).orderBy(desc(vendors.createdAt)),
+        db.select().from(vendorProducts).orderBy(desc(vendorProducts.createdAt)),
         db.select().from(orders).orderBy(desc(orders.createdAt)),
         db.select().from(orderVendors).orderBy(desc(orderVendors.createdAt)),
         db.select().from(invoices).orderBy(desc(invoices.createdAt)),
@@ -116,6 +120,7 @@ export async function GET() {
       customers: customerRows,
       persons: personRows,
       vendors: vendorRows,
+      vendorProducts: vendorProductRows,
       orders: orderRows,
       orderVendors: orderVendorRows,
       invoices: invoiceRows,
@@ -222,6 +227,21 @@ export async function POST(request: Request) {
       return Response.json({ record: row }, { status: 201 });
     }
 
+    if (type === "vendorProduct") {
+      const missing = required(payload, ["vendorId", "name", "pricingBasis", "rentalCharge"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      const vendorId = clean(payload.vendorId);
+      const pricingBasis = clean(payload.pricingBasis);
+      const rentalCharge = money(payload.rentalCharge);
+      const [vendor] = await db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1);
+      if (!vendor) return Response.json({ error: "Select a valid vendor" }, { status: 400 });
+      if (!["Per day", "Per event"].includes(pricingBasis)) return Response.json({ error: "Select per-day or per-event pricing" }, { status: 400 });
+      if (!rentalCharge) return Response.json({ error: "Rental charge must be greater than zero" }, { status: 400 });
+      const row = { id: crypto.randomUUID(), vendorId, name: clean(payload.name), pricingBasis, rentalCharge, status: "Active", createdAt };
+      await db.insert(vendorProducts).values(row);
+      return Response.json({ record: row }, { status: 201 });
+    }
+
     if (type === "order") {
       const missing = required(payload, ["customerId", "salespersonId", "assignedPersonId", "eventDate"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
@@ -274,32 +294,40 @@ export async function POST(request: Request) {
     }
 
     if (type === "orderVendor") {
-      const missing = required(payload, user.role === "supervisor" ? ["orderId", "vendorId", "productName"] : ["orderId", "vendorId", "productName", "amount"]);
+      const missing = required(payload, ["orderId", "vendorId", "productId", "quantity"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
-      const orderId = clean(payload.orderId); const vendorId = clean(payload.vendorId);
-      const [[order], [vendor]] = await Promise.all([
+      const orderId = clean(payload.orderId); const vendorId = clean(payload.vendorId); const productId = clean(payload.productId);
+      const [[order], [vendor], [product]] = await Promise.all([
         db.select({ id: orders.id }).from(orders).where(eq(orders.id, orderId)).limit(1),
         db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1),
+        db.select().from(vendorProducts).where(eq(vendorProducts.id, productId)).limit(1),
       ]);
       if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
       if (!vendor) return Response.json({ error: "Select a valid vendor" }, { status: 400 });
+      if (!product || product.vendorId !== vendorId) return Response.json({ error: "Select a product listed by this vendor" }, { status: 400 });
       if (user.role === "supervisor") {
         const [supervisorPerson] = await db.select({ id: persons.id }).from(persons).where(sql`lower(${persons.email}) = ${user.email.toLowerCase()}`).limit(1);
         if (!supervisorPerson) return Response.json({ error: "Supervisor profile is not linked to a Person record" }, { status: 400 });
         const [ownedOrder] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.id, orderId), eq(orders.assignedPersonId, supervisorPerson.id), ne(orders.status, "Completed"), ne(orders.status, "Cancelled"))).limit(1);
         if (!ownedOrder) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       }
-      const amount = userRole === "supervisor" ? 0 : money(payload.amount); if (userRole !== "supervisor" && !amount) return Response.json({ error: "Vendor amount must be greater than zero" }, { status: 400 });
-      const productName = clean(payload.productName);
-      const [existing] = await db.select().from(orderVendors).where(and(eq(orderVendors.orderId, orderId), eq(orderVendors.vendorId, vendorId), eq(orderVendors.productName, productName))).limit(1);
+      const quantity = positiveInteger(payload.quantity);
+      const rentalDays = product.pricingBasis === "Per day" ? positiveInteger(payload.rentalDays) : 1;
+      const calculatedAmount = calculateTentativeCost(product.rentalCharge, product.pricingBasis as PricingBasis, quantity, rentalDays);
+      const requestedAmount = money(payload.amount);
+      const amount = userRole === "supervisor" ? calculatedAmount : requestedAmount || calculatedAmount;
+      const productName = product.name;
+      const assignment = { productId, productName, pricingBasis: product.pricingBasis, unitRate: product.rentalCharge, quantity, rentalDays, amount, notes: clean(payload.notes) };
+      const [existing] = await db.select().from(orderVendors).where(and(eq(orderVendors.orderId, orderId), eq(orderVendors.productId, productId))).limit(1);
       if (existing && user.role !== "supervisor") {
-        await db.update(orderVendors).set({ amount, notes: clean(payload.notes) }).where(eq(orderVendors.id, existing.id));
-        return Response.json({ record: { ...existing, amount, notes: clean(payload.notes) } });
+        await db.update(orderVendors).set(assignment).where(eq(orderVendors.id, existing.id));
+        return Response.json({ record: { ...existing, ...assignment } });
       }
-      if (existing) return Response.json({ record: { ...existing, amount: 0 } });
-      const row = { id: crypto.randomUUID(), orderId, vendorId, productName, amount: userRole === "supervisor" ? 0 : amount, notes: clean(payload.notes), createdAt };
+      if (existing) return Response.json({ record: { ...existing, amount: 0, unitRate: 0 } });
+      const row = { id: crypto.randomUUID(), orderId, vendorId, ...assignment, createdAt };
       await db.insert(orderVendors).values(row);
-      return Response.json({ record: row }, { status: 201 });
+      const visibleRow = userRole === "supervisor" ? { ...row, amount: 0, unitRate: 0 } : row;
+      return Response.json({ record: visibleRow }, { status: 201 });
     }
 
     if (type === "invoice") {

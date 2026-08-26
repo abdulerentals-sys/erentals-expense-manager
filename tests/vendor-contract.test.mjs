@@ -25,10 +25,11 @@ test("orders support multiple vendor product assignments", async () => {
     read("app/api/records/route.ts"), read("app/api/records/mongodb.ts"),
   ]);
   assert.match(dashboard, /kind === "orderVendor"/);
-  assert.match(dashboard, /name="productName"/);
+  assert.match(dashboard, /name="productId"/);
+  assert.match(dashboard, /name="quantity"/);
   assert.match(dashboard, /name="vendorAssignments"/);
   assert.match(dashboard, /Add another vendor/);
-  assert.match(dashboard, /Assign vendor/);
+  assert.match(dashboard, /Assign product/);
   assert.match(schema, /export const orderVendors/);
   for (const source of [route, mongo]) {
     assert.match(source, /type === "orderVendor"/);

@@ -18,7 +18,7 @@ test("supervisor workspace is ownership-scoped and has read-only history", async
   assert.match(route, /filterRecordData\(data, user\.role, user\.email\)/);
 });
 
-test("supervisors can assign vendors without viewing or setting prices", async () => {
+test("supervisors can assign catalog products without viewing or overriding prices", async () => {
   const [permissions, dashboard, route, mongo] = await Promise.all([
     read("app/auth/permissions.ts"),
     read("app/components/ExpenseDashboard.tsx"),
@@ -26,11 +26,12 @@ test("supervisors can assign vendors without viewing or setting prices", async (
     read("app/api/records/mongodb.ts"),
   ]);
   assert.match(permissions, /supervisor:[^\n]*"orderVendor"/);
-  assert.match(dashboard, /user\.role !== "supervisor"[\s\S]*Vendor amount/);
-  assert.match(dashboard, /user\.role === "supervisor"[\s\S]*Item price hidden/);
+  assert.match(dashboard, /user\.role !== "supervisor"[\s\S]*Final cost override/);
+  assert.match(dashboard, /user\.role === "supervisor"[\s\S]*Cost calculated privately/);
   for (const source of [route, mongo]) {
     assert.match(source, /userRole === "supervisor"/);
-    assert.match(source, /amount: userRole === "supervisor" \? 0/);
+    assert.match(source, /userRole === "supervisor" \? calculatedAmount/);
+    assert.match(source, /amount: 0, unitRate: 0/);
   }
 });
 

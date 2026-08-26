@@ -13,7 +13,7 @@ export type DashboardSection =
   | "history"
   | "users";
 
-export type RecordType = "customer" | "person" | "vendor" | "order" | "orderVendor" | "invoice" | "expense" | "payment";
+export type RecordType = "customer" | "person" | "vendor" | "vendorProduct" | "order" | "orderVendor" | "invoice" | "expense" | "payment";
 export type PaymentDirection = "Received" | "Paid";
 
 export const roleLabels: Record<UserRole, string> = {
@@ -38,8 +38,8 @@ const sectionsByRole: Record<UserRole, DashboardSection[]> = {
 };
 
 const recordsByRole: Record<UserRole, RecordType[]> = {
-  admin: ["customer", "person", "vendor", "order", "orderVendor", "invoice", "expense", "payment"],
-  accountant: ["customer", "vendor", "orderVendor", "invoice", "expense", "payment"],
+  admin: ["customer", "person", "vendor", "vendorProduct", "order", "orderVendor", "invoice", "expense", "payment"],
+  accountant: ["customer", "vendor", "vendorProduct", "orderVendor", "invoice", "expense", "payment"],
   supervisor: ["person", "orderVendor", "expense"],
   sales: ["customer", "person", "order", "invoice", "payment"],
 };
@@ -78,6 +78,7 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
     const sanitizeOrder = (order: Record<string, unknown>) => ({ ...order, contractValue: 0 });
     const customers = Array.isArray(data.customers) ? data.customers as Array<Record<string, unknown>> : [];
     const orderVendors = Array.isArray(data.orderVendors) ? data.orderVendors as Array<Record<string, unknown>> : [];
+    const vendorProducts = Array.isArray(data.vendorProducts) ? data.vendorProducts as Array<Record<string, unknown>> : [];
     const vendors = Array.isArray(data.vendors) ? data.vendors as Array<Record<string, unknown>> : [];
     const expenses = Array.isArray(data.expenses) ? data.expenses as Array<Record<string, unknown>> : [];
     return {
@@ -86,9 +87,10 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
       historyCustomers: customers.filter((customer) => allCustomerIds.has(String(customer.id ?? ""))).map((customer) => ({ id: customer.id, name: customer.name, businessName: customer.businessName })),
       persons: people.filter((person) => supervisorPersonIds.has(String(person.id ?? "")) || activeOrderIds.has(String(person.orderId ?? ""))),
       vendors: vendors.map((vendor) => ({ id: vendor.id, name: vendor.name, contactPerson: "", phone: "", email: "", gstin: "", address: "", paymentMode: "", status: vendor.status, createdAt: vendor.createdAt })),
+      vendorProducts: vendorProducts.map((product) => ({ ...product, rentalCharge: 0 })),
       orders: activeOrders.map(sanitizeOrder),
       historyOrders: ownOrders.map(sanitizeOrder),
-      orderVendors: orderVendors.filter((assignment) => activeOrderIds.has(String(assignment.orderId ?? ""))).map((assignment) => ({ ...assignment, amount: 0 })),
+      orderVendors: orderVendors.filter((assignment) => activeOrderIds.has(String(assignment.orderId ?? ""))).map((assignment) => ({ ...assignment, amount: 0, unitRate: 0 })),
       expenses: expenses.filter((expense) => activeOrderIds.has(String(expense.orderId ?? "")) && supervisorPersonIds.has(String(expense.personId ?? ""))),
       invoices: [],
       payments: [],
@@ -96,7 +98,7 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
       supervisorOrderIds: [...allOrderIds],
     } as T;
   }
-  const hidden = ["expenses", "vendors", "orderVendors"];
+  const hidden = ["expenses", "vendors", "vendorProducts", "orderVendors"];
   return Object.fromEntries(
     Object.entries(data).map(([key, value]) => {
       if (hidden.includes(key)) return [key, []];
