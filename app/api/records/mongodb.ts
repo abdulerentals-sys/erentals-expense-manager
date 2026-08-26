@@ -593,24 +593,29 @@ export async function POST(request: Request, context: RequestContext = { userRol
       }
 
       const personId = "";
+      const customerId = direction === "Received" ? clean(payload.customerId) : "";
       const vendorId = direction === "Paid" ? clean(payload.vendorId) : "";
       const allocations = paymentAllocations(payload);
       if (!allocations.length) throw new FormError("Select at least one order and enter its allocation");
       if (new Set(allocations.map((item) => item.orderId)).size !== allocations.length) throw new FormError("Each order can only be selected once");
+      if (direction === "Received" && !customerId) {
+        throw new FormError("Select the customer");
+      }
       if (direction === "Paid" && !vendorId) {
         throw new FormError("Select the vendor or payee");
       }
+      if (customerId && !await findById(collections.customers, customerId)) throw new FormError("Select a valid customer");
       if (vendorId && !await findById(collections.vendors, vendorId)) throw new FormError("Select a valid vendor or payee");
       if (allocations.reduce((sum, item) => sum + item.amount, 0) !== amount) throw new FormError("Allocation total must equal the payment amount");
       const linkedOrders = await Promise.all(allocations.map((allocation) => findById(collections.orders, allocation.orderId)));
       if (linkedOrders.some((order) => !order)) throw new FormError("Select valid orders");
-      if (direction === "Received" && new Set(linkedOrders.map((order) => order!.customerId)).size > 1) throw new FormError("Customer receipts can only cover orders for the same customer");
+      if (direction === "Received" && linkedOrders.some((order) => order!.customerId !== customerId)) throw new FormError("Customer receipts can only use orders belonging to the selected customer");
       if (direction === "Paid") {
         const assignedOrderIds = await collections.orderVendors.distinct("orderId", { orderId: { $in: allocations.map((item) => item.orderId) }, vendorId });
         if (assignedOrderIds.length !== allocations.length) throw new FormError("Vendor is not assigned to every selected order");
       }
       const rows: Payment[] = allocations.map((allocation, index) => ({
-        id: crypto.randomUUID(), orderId: allocation.orderId, personId, vendorId, invoiceId: "", customerId: linkedOrders[index]!.customerId, direction, amount: allocation.amount,
+        id: crypto.randomUUID(), orderId: allocation.orderId, personId, vendorId, invoiceId: "", customerId: direction === "Received" ? customerId : linkedOrders[index]!.customerId, direction, amount: allocation.amount,
         paymentDate: clean(payload.paymentDate), method: clean(payload.method), reference: clean(payload.reference), notes: clean(payload.notes), createdAt,
       }));
       await collections.payments.insertMany(rows);
