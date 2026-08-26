@@ -1,0 +1,1 @@
+ALTER TABLE `orders` ADD `salesperson_id` text DEFAULT '' NOT NULL;

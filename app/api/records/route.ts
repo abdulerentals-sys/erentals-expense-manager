@@ -1,6 +1,7 @@
 import { and, desc, eq, ne, sql } from "drizzle-orm";
 import { canCreateRecord, canRecordPayment, filterRecordData } from "../../auth/permissions";
 import { getSessionUser } from "../../auth/session";
+import { findUserByEmail } from "../../auth/store";
 import { getDb } from "../../../db";
 import { ensureSchema } from "../../../db/ensure";
 import {
@@ -61,6 +62,15 @@ function validDate(value: unknown) {
 
 function invalidDate(payload: Record<string, unknown>, fields: string[]) {
   return fields.find((field) => !validDate(payload[field]));
+}
+
+function isSalesperson<T extends { role: string }>(person: T | undefined): person is T {
+  return Boolean(person?.role.trim().toLowerCase().includes("sales"));
+}
+
+function isSupervisor<T extends { role: string }>(person: T | undefined): person is T {
+  const role = person?.role.trim().toLowerCase() ?? "";
+  return role.includes("supervisor") || role.includes("execution manager");
 }
 
 function usesNetlifyStorage() {
@@ -213,19 +223,28 @@ export async function POST(request: Request) {
     }
 
     if (type === "order") {
-      const missing = required(payload, ["title", "customerId", "assignedPersonId", "eventDate"]);
+      const missing = required(payload, ["customerId", "salespersonId", "assignedPersonId", "eventDate"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       if (invalidDate(payload, ["eventDate"])) {
         return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
       }
       const customerId = clean(payload.customerId);
+      const salespersonId = clean(payload.salespersonId);
       const assignedPersonId = clean(payload.assignedPersonId);
-      const [[customer], [assignedPerson]] = await Promise.all([
+      const [[customer], [salesperson], [assignedPerson]] = await Promise.all([
         db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1),
-        db.select({ id: persons.id }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
+        db.select({ id: persons.id, role: persons.role, email: persons.email }).from(persons).where(eq(persons.id, salespersonId)).limit(1),
+        db.select({ id: persons.id, role: persons.role, email: persons.email }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
       ]);
       if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
-      if (!assignedPerson) return Response.json({ error: "Select a valid execution lead" }, { status: 400 });
+      if (!isSalesperson(salesperson)) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
+      if (!isSupervisor(assignedPerson)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
+      const [salesUser, supervisorUser] = await Promise.all([
+        findUserByEmail(salesperson.email.trim().toLowerCase()),
+        findUserByEmail(assignedPerson.email.trim().toLowerCase()),
+      ]);
+      if (!salesUser || salesUser.role !== "sales" || salesUser.status !== "Active") return Response.json({ error: "The salesperson must be linked by email to an active Sales person dashboard user" }, { status: 400 });
+      if (!supervisorUser || supervisorUser.role !== "supervisor" || supervisorUser.status !== "Active") return Response.json({ error: "The supervisor must be linked by email to an active Supervisor dashboard user" }, { status: 400 });
       const contractValue = money(payload.contractValue);
       if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
       const row = {
@@ -233,6 +252,7 @@ export async function POST(request: Request) {
         orderNo: clean(payload.orderNo) || `ORD-${Date.now().toString().slice(-6)}`,
         title: clean(payload.title),
         customerId,
+        salespersonId,
         assignedPersonId,
         venue: clean(payload.venue),
         eventDate: clean(payload.eventDate),
@@ -464,7 +484,7 @@ export async function PATCH(request: Request) {
     if (type !== "order" || !id) {
       return Response.json({ error: "Select a valid order to edit" }, { status: 400 });
     }
-    const missing = required(payload, user.role === "supervisor" ? ["title", "eventDate"] : ["orderNo", "title", "customerId", "assignedPersonId", "eventDate"]);
+    const missing = required(payload, user.role === "supervisor" ? ["eventDate"] : ["orderNo", "customerId", "salespersonId", "assignedPersonId", "eventDate"]);
     if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
     if (invalidDate(payload, ["eventDate"])) {
       return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
@@ -472,11 +492,13 @@ export async function PATCH(request: Request) {
 
     const db = getDb();
     const customerId = clean(payload.customerId);
+    const salespersonId = clean(payload.salespersonId);
     const assignedPersonId = clean(payload.assignedPersonId);
-    const [[existingOrder], [customer], [assignedPerson]] = await Promise.all([
+    const [[existingOrder], [customer], [salesperson], [assignedPerson]] = await Promise.all([
       db.select().from(orders).where(eq(orders.id, id)).limit(1),
       db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1),
-      db.select({ id: persons.id }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
+      db.select({ id: persons.id, role: persons.role, email: persons.email }).from(persons).where(eq(persons.id, salespersonId)).limit(1),
+      db.select({ id: persons.id, role: persons.role, email: persons.email }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
     ]);
     if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
     if (user.role === "supervisor") {
@@ -485,10 +507,17 @@ export async function PATCH(request: Request) {
       if (existingOrder.assignedPersonId !== supervisorPerson.id || ["Completed", "Cancelled"].includes(existingOrder.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       const updates = { title: clean(payload.title), venue: clean(payload.venue), eventDate: clean(payload.eventDate), status: clean(payload.status) || existingOrder.status };
       await db.update(orders).set(updates).where(eq(orders.id, id));
-      return Response.json({ record: { ...existingOrder, ...updates, assignedPersonId: existingOrder.assignedPersonId, contractValue: 0 } });
+      return Response.json({ record: { ...existingOrder, ...updates, salespersonId: existingOrder.salespersonId, assignedPersonId: existingOrder.assignedPersonId, contractValue: 0 } });
     }
     if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
-    if (!assignedPerson) return Response.json({ error: "Select a valid execution lead" }, { status: 400 });
+    if (!isSalesperson(salesperson)) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
+    if (!isSupervisor(assignedPerson)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
+    const [salesUser, supervisorUser] = await Promise.all([
+      findUserByEmail(salesperson.email.trim().toLowerCase()),
+      findUserByEmail(assignedPerson.email.trim().toLowerCase()),
+    ]);
+    if (!salesUser || salesUser.role !== "sales" || salesUser.status !== "Active") return Response.json({ error: "The salesperson must be linked by email to an active Sales person dashboard user" }, { status: 400 });
+    if (!supervisorUser || supervisorUser.role !== "supervisor" || supervisorUser.status !== "Active") return Response.json({ error: "The supervisor must be linked by email to an active Supervisor dashboard user" }, { status: 400 });
     const contractValue = money(payload.contractValue);
     if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
 
@@ -496,6 +525,7 @@ export async function PATCH(request: Request) {
       orderNo: clean(payload.orderNo),
       title: clean(payload.title),
       customerId,
+      salespersonId,
       assignedPersonId,
       venue: clean(payload.venue),
       eventDate: clean(payload.eventDate),

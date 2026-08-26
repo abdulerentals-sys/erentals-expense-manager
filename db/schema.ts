@@ -54,6 +54,7 @@ export const orders = sqliteTable("orders", {
   orderNo: text("order_no").notNull().unique(),
   title: text("title").notNull(),
   customerId: text("customer_id").notNull(),
+  salespersonId: text("salesperson_id").notNull().default(""),
   assignedPersonId: text("assigned_person_id").notNull(),
   venue: text("venue").notNull(),
   eventDate: text("event_date").notNull(),
