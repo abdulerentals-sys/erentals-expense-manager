@@ -32,6 +32,7 @@ export const persons = sqliteTable("persons", {
   email: text("email").notNull(),
   paymentMode: text("payment_mode").notNull(),
   status: text("status").notNull().default("Active"),
+  orderId: text("order_id").notNull().default(""),
   createdAt: text("created_at").notNull(),
 });
 

@@ -1,0 +1,1 @@
+ALTER TABLE `persons` ADD `order_id` text DEFAULT '' NOT NULL;

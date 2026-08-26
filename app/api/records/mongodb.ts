@@ -7,6 +7,7 @@ import {
 } from "mongodb";
 
 type Payload = Record<string, unknown>;
+type RequestContext = { userRole: string; userEmail: string };
 
 type Customer = {
   id: string;
@@ -28,6 +29,7 @@ type Person = {
   email: string;
   paymentMode: string;
   status: string;
+  orderId: string;
   createdAt: string;
 };
 
@@ -279,11 +281,13 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: Request, context: RequestContext = { userRole: "admin", userEmail: "" }) {
   try {
     const body = (await request.json()) as { type?: string; payload?: Payload };
     const type = clean(body.type);
     const payload = body.payload ?? {};
+    const userRole = context.userRole;
+    const userEmail = context.userEmail;
     const { collections } = await getMongoDatabase();
     const createdAt = now();
 
@@ -295,7 +299,7 @@ export async function POST(request: Request) {
         name: clean(payload.name),
         businessName: clean(payload.businessName),
         phone: clean(payload.phone),
-        email: clean(payload.email),
+        email: clean(payload.email).toLowerCase(),
         gstin: clean(payload.gstin),
         address: clean(payload.address),
         openingBalance: Math.round(Number(payload.openingBalance) || 0),
@@ -308,14 +312,22 @@ export async function POST(request: Request) {
     if (type === "person") {
       const missing = required(payload, ["name", "role", "phone"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      const orderId = clean(payload.orderId);
+      if (userRole === "supervisor") {
+        const supervisorPerson = await collections.persons.findOne({ email: userEmail }, { collation: { locale: "en", strength: 2 } });
+        if (!supervisorPerson) throw new FormError("Supervisor profile is not linked to a Person record");
+        const ownedOrder = await collections.orders.findOne({ id: orderId, assignedPersonId: supervisorPerson.id, status: { $nin: ["Completed", "Cancelled"] } });
+        if (!ownedOrder) throw new FormError("Supervisor actions require an active assigned order");
+      }
       const row: Person = {
         id: crypto.randomUUID(),
         name: clean(payload.name),
         role: clean(payload.role),
         phone: clean(payload.phone),
-        email: clean(payload.email),
+        email: clean(payload.email).toLowerCase(),
         paymentMode: clean(payload.paymentMode) || "UPI",
         status: "Active",
+        orderId,
         createdAt,
       };
       await collections.persons.insertOne(row);
@@ -373,13 +385,26 @@ export async function POST(request: Request) {
     }
 
     if (type === "orderVendor") {
-      const missing = required(payload, ["orderId", "vendorId", "productName", "amount"]);
+      const missing = required(payload, userRole === "supervisor" ? ["orderId", "vendorId", "productName"] : ["orderId", "vendorId", "productName", "amount"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       const orderId = clean(payload.orderId); const vendorId = clean(payload.vendorId);
       const [order, vendor] = await Promise.all([findById(collections.orders, orderId), findById(collections.vendors, vendorId)]);
       if (!order) throw new FormError("Select a valid order"); if (!vendor) throw new FormError("Select a valid vendor");
-      const amount = money(payload.amount); if (!amount) throw new FormError("Vendor amount must be greater than zero");
-      const row: OrderVendor = { id: crypto.randomUUID(), orderId, vendorId, productName: clean(payload.productName), amount, notes: clean(payload.notes), createdAt };
+      if (userRole === "supervisor") {
+        const supervisorPerson = await collections.persons.findOne({ email: userEmail }, { collation: { locale: "en", strength: 2 } });
+        if (!supervisorPerson) throw new FormError("Supervisor profile is not linked to a Person record");
+        const ownedOrder = await collections.orders.findOne({ id: orderId, assignedPersonId: supervisorPerson.id, status: { $nin: ["Completed", "Cancelled"] } });
+        if (!ownedOrder) throw new FormError("Supervisor actions require an active assigned order");
+      }
+      const amount = userRole === "supervisor" ? 0 : money(payload.amount); if (userRole !== "supervisor" && !amount) throw new FormError("Vendor amount must be greater than zero");
+      const productName = clean(payload.productName);
+      const existing = await collections.orderVendors.findOne({ orderId, vendorId, productName });
+      if (existing && userRole !== "supervisor") {
+        await collections.orderVendors.updateOne({ id: existing.id }, { $set: { amount, notes: clean(payload.notes) } });
+        return Response.json({ record: { ...existing, amount, notes: clean(payload.notes) } });
+      }
+      if (existing) return Response.json({ record: { ...existing, amount: 0 } });
+      const row: OrderVendor = { id: crypto.randomUUID(), orderId, vendorId, productName, amount: userRole === "supervisor" ? 0 : amount, notes: clean(payload.notes), createdAt };
       await collections.orderVendors.insertOne(row);
       return Response.json({ record: row }, { status: 201 });
     }
@@ -456,13 +481,20 @@ export async function POST(request: Request) {
     }
 
     if (type === "expense") {
-      const missing = required(payload, ["orderId", "personId", "category", "expenseDate", "amount"]);
+      const missing = required(payload, userRole === "supervisor" ? ["orderId", "category", "expenseDate", "amount"] : ["orderId", "personId", "category", "expenseDate", "amount"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       if (invalidDate(payload, ["expenseDate"])) {
         return Response.json({ error: "Enter a valid expense date" }, { status: 400 });
       }
       const orderId = clean(payload.orderId);
-      const personId = clean(payload.personId);
+      let personId = clean(payload.personId);
+      if (userRole === "supervisor") {
+        const supervisorPerson = await collections.persons.findOne({ email: userEmail }, { collation: { locale: "en", strength: 2 } });
+        if (!supervisorPerson) throw new FormError("Supervisor profile is not linked to a Person record");
+        const ownedOrder = await collections.orders.findOne({ id: orderId, assignedPersonId: supervisorPerson.id, status: { $nin: ["Completed", "Cancelled"] } });
+        if (!ownedOrder) throw new FormError("Supervisor actions require an active assigned order");
+        personId = supervisorPerson.id;
+      }
       const vendorId = clean(payload.vendorId);
       const [order, person] = await Promise.all([
         findById(collections.orders, orderId),
@@ -549,8 +581,9 @@ export async function POST(request: Request) {
   }
 }
 
-export async function PATCH(request: Request) {
+export async function PATCH(request: Request, context: RequestContext = { userRole: "admin", userEmail: "" }) {
   try {
+    if (!["admin", "supervisor"].includes(context.userRole)) throw new FormError("Only an administrator or the assigned supervisor can edit orders");
     const body = (await request.json()) as { type?: string; id?: string; payload?: Payload };
     const type = clean(body.type);
     const id = clean(body.id);
@@ -558,7 +591,9 @@ export async function PATCH(request: Request) {
     if (type !== "order" || !id) {
       return Response.json({ error: "Select a valid order to edit" }, { status: 400 });
     }
-    const missing = required(payload, ["orderNo", "title", "customerId", "assignedPersonId", "eventDate"]);
+    const userRole = context.userRole;
+    const userEmail = context.userEmail;
+    const missing = required(payload, userRole === "supervisor" ? ["title", "eventDate"] : ["orderNo", "title", "customerId", "assignedPersonId", "eventDate"]);
     if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
     if (invalidDate(payload, ["eventDate"])) {
       return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
@@ -573,6 +608,14 @@ export async function PATCH(request: Request) {
       findById(collections.persons, assignedPersonId),
     ]);
     if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
+    if (userRole === "supervisor") {
+      const supervisorPerson = await collections.persons.findOne({ email: userEmail }, { collation: { locale: "en", strength: 2 } });
+      if (!supervisorPerson) throw new FormError("Supervisor profile is not linked to a Person record");
+      if (existingOrder.assignedPersonId !== supervisorPerson.id || ["Completed", "Cancelled"].includes(existingOrder.status)) throw new FormError("Supervisor actions require an active assigned order");
+      const updates = { title: clean(payload.title), venue: clean(payload.venue), eventDate: clean(payload.eventDate), status: clean(payload.status) || existingOrder.status };
+      await collections.orders.updateOne({ id }, { $set: updates });
+      return Response.json({ record: { ...existingOrder, ...updates, assignedPersonId: existingOrder.assignedPersonId, contractValue: 0 } });
+    }
     if (!customer) throw new FormError("Select a valid customer");
     if (!assignedPerson) throw new FormError("Select a valid execution lead");
     const contractValue = money(payload.contractValue);

@@ -12,7 +12,7 @@ export function ensureSchema() {
       d1.prepare("CREATE TABLE IF NOT EXISTS users (id text PRIMARY KEY NOT NULL, name text NOT NULL, email text NOT NULL, role text NOT NULL, status text DEFAULT 'Active' NOT NULL, password_hash text NOT NULL, must_change_password integer DEFAULT 1 NOT NULL, created_at text NOT NULL, updated_at text NOT NULL)"),
       d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (email)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS customers (id text PRIMARY KEY NOT NULL, name text NOT NULL, business_name text NOT NULL, phone text NOT NULL, email text NOT NULL, gstin text NOT NULL, address text NOT NULL, opening_balance integer DEFAULT 0 NOT NULL, created_at text NOT NULL)"),
-      d1.prepare("CREATE TABLE IF NOT EXISTS persons (id text PRIMARY KEY NOT NULL, name text NOT NULL, role text NOT NULL, phone text NOT NULL, email text NOT NULL, payment_mode text NOT NULL, status text DEFAULT 'Active' NOT NULL, created_at text NOT NULL)"),
+      d1.prepare("CREATE TABLE IF NOT EXISTS persons (id text PRIMARY KEY NOT NULL, name text NOT NULL, role text NOT NULL, phone text NOT NULL, email text NOT NULL, payment_mode text NOT NULL, status text DEFAULT 'Active' NOT NULL, order_id text DEFAULT '' NOT NULL, created_at text NOT NULL)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS vendors (id text PRIMARY KEY NOT NULL, name text NOT NULL, contact_person text NOT NULL, phone text NOT NULL, email text NOT NULL, gstin text NOT NULL, address text NOT NULL, payment_mode text NOT NULL, status text DEFAULT 'Active' NOT NULL, created_at text NOT NULL)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS orders (id text PRIMARY KEY NOT NULL, order_no text NOT NULL, title text NOT NULL, customer_id text NOT NULL, assigned_person_id text NOT NULL, venue text NOT NULL, event_date text NOT NULL, status text DEFAULT 'Planned' NOT NULL, contract_value integer DEFAULT 0 NOT NULL, created_at text NOT NULL)"),
       d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS orders_order_no_unique ON orders (order_no)"),
@@ -39,6 +39,11 @@ export function ensureSchema() {
     const expenseNames = new Set((expenseColumns.results ?? []).map((column) => column.name));
     if (!expenseNames.has("vendor_id")) {
       await d1.prepare("ALTER TABLE expenses ADD COLUMN vendor_id text DEFAULT '' NOT NULL").run();
+    }
+    const personColumns = await d1.prepare("PRAGMA table_info(persons)").all<{ name: string }>();
+    const personNames = new Set((personColumns.results ?? []).map((column) => column.name));
+    if (!personNames.has("order_id")) {
+      await d1.prepare("ALTER TABLE persons ADD COLUMN order_id text DEFAULT '' NOT NULL").run();
     }
   })().catch((error) => {
     schemaReady = null;
