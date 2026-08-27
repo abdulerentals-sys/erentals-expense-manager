@@ -68,6 +68,30 @@ function invalidDate(payload: Record<string, unknown>, fields: string[]) {
   return fields.find((field) => !validDate(payload[field]));
 }
 
+function validTime(value: unknown) {
+  return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(clean(value));
+}
+
+function asBoolean(value: unknown) {
+  return value === true || ["true", "on", "1"].includes(clean(value).toLowerCase());
+}
+
+function orderScheduleError(payload: Record<string, unknown>, pickupFromGodown: boolean) {
+  const missing = required(payload, ["deliveryDate", "deliveryTime", "pickupDate", "pickupTime"]);
+  if (missing) return `${missing} is required`;
+  if (invalidDate(payload, ["deliveryDate", "pickupDate"]) || !validTime(payload.deliveryTime) || !validTime(payload.pickupTime)) {
+    return "Enter valid delivery and pickup dates and times";
+  }
+  if (`${clean(payload.pickupDate)}T${clean(payload.pickupTime)}` < `${clean(payload.deliveryDate)}T${clean(payload.deliveryTime)}`) {
+    return "Pickup date and time cannot be before delivery date and time";
+  }
+  if (!pickupFromGodown) {
+    const siteMissing = required(payload, ["deliveryAddress", "pickupAddress", "contactPerson", "contactPhone"]);
+    if (siteMissing) return `${siteMissing} is required unless pickup from godown is selected`;
+  }
+  return "";
+}
+
 async function teamAssignments(): Promise<TeamAssignment[]> {
   return (await listUsers()).map(({ personId, role, status }) => ({ personId, role, status }));
 }
@@ -122,13 +146,18 @@ export async function GET() {
       personId: payment.personId || "",
       vendorId: payment.vendorId || "",
     }));
+    const normalizedOrders = orderRows.map((order) => ({
+      ...order,
+      deliveryDate: order.deliveryDate || order.eventDate,
+      pickupDate: order.pickupDate || order.eventDate,
+    }));
 
     return Response.json(filterRecordData({
       customers: customerRows,
       persons: personRows,
       vendors: vendorRows,
       vendorProducts: vendorProductRows,
-      orders: orderRows,
+      orders: normalizedOrders,
       orderVendors: orderVendorRows,
       invoices: invoiceRows,
       expenses: expenseRows,
@@ -253,14 +282,21 @@ export async function POST(request: Request) {
     }
 
     if (type === "order") {
-      const missing = required(payload, ["customerId", "salespersonId", "assignedPersonId", "eventDate"]);
+      const missing = required(payload, ["customerId", "assignedPersonId", "eventDate"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       if (invalidDate(payload, ["eventDate"])) {
         return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
       }
       const customerId = clean(payload.customerId);
-      const salespersonId = clean(payload.salespersonId);
+      const userRole = user.role;
+      const context = { userPersonId: user.personId };
+      const salespersonId = userRole === "sales" ? context.userPersonId : clean(payload.salespersonId);
       const assignedPersonId = clean(payload.assignedPersonId);
+      if (!salespersonId && userRole === "sales") return Response.json({ error: "Sales dashboard is not linked to a People record" }, { status: 400 });
+      if (!salespersonId) return Response.json({ error: "salespersonId is required" }, { status: 400 });
+      const pickupFromGodown = asBoolean(payload.pickupFromGodown);
+      const scheduleError = orderScheduleError(payload, pickupFromGodown);
+      if (scheduleError) return Response.json({ error: scheduleError }, { status: 400 });
       const [[customer], [salesperson], [assignedPerson]] = await Promise.all([
         db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1),
         db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, salespersonId)).limit(1),
@@ -275,6 +311,11 @@ export async function POST(request: Request) {
       if (!isOrderTeamPerson(assignedPerson, "supervisor", assignmentsForTeam)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
       const contractValue = money(payload.contractValue);
       if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
+      const advancePayment = money(payload.advancePayment);
+      if (advancePayment > contractValue) return Response.json({ error: "Advance payment cannot exceed the order value" }, { status: 400 });
+      if (advancePayment && (invalidDate(payload, ["advancePaymentDate"]) || !clean(payload.advancePaymentMethod))) {
+        return Response.json({ error: "Enter the advance payment date and method" }, { status: 400 });
+      }
       const row = {
         id: crypto.randomUUID(),
         orderNo: clean(payload.orderNo) || `ORD-${Date.now().toString().slice(-6)}`,
@@ -284,6 +325,20 @@ export async function POST(request: Request) {
         assignedPersonId,
         venue: clean(payload.venue),
         eventDate: clean(payload.eventDate),
+        deliveryAddress: clean(payload.deliveryAddress),
+        deliveryDate: clean(payload.deliveryDate),
+        deliveryTime: clean(payload.deliveryTime),
+        pickupDate: clean(payload.pickupDate),
+        pickupTime: clean(payload.pickupTime),
+        pickupAddress: clean(payload.pickupAddress),
+        pickupFromGodown,
+        contactPerson: clean(payload.contactPerson),
+        contactPhone: clean(payload.contactPhone),
+        productName: clean(payload.productName),
+        productPrice: money(payload.productPrice),
+        attachmentKey: clean(payload.attachmentKey),
+        attachmentName: clean(payload.attachmentName),
+        attachmentType: clean(payload.attachmentType),
         status: clean(payload.status) || "Planned",
         contractValue,
         createdAt,
@@ -296,9 +351,33 @@ export async function POST(request: Request) {
         return vendor;
       }));
       if (validVendors.some((vendor) => !vendor)) return Response.json({ error: "Select valid vendors for the order" }, { status: 400 });
-      await db.insert(orders).values(row);
-      if (assignments.length) await db.insert(orderVendors).values(assignments.map((assignment) => ({ id: crypto.randomUUID(), orderId: row.id, ...assignment, createdAt })));
-      return Response.json({ record: row }, { status: 201 });
+      const assignmentRows = assignments.map((assignment) => ({ id: crypto.randomUUID(), orderId: row.id, ...assignment, createdAt }));
+      const advanceRow = advancePayment ? {
+        id: crypto.randomUUID(),
+        orderId: row.id,
+        manualOrderId: "",
+        personId: "",
+        vendorId: "",
+        invoiceId: "",
+        customerId,
+        direction: "Received",
+        amount: advancePayment,
+        paymentDate: clean(payload.advancePaymentDate),
+        method: clean(payload.advancePaymentMethod),
+        reference: clean(payload.advanceReference),
+        notes: clean(payload.advanceNotes) || "Advance payment received during order creation",
+        createdAt,
+      } : null;
+      if (assignmentRows.length && advanceRow) {
+        await db.batch([db.insert(orders).values(row), db.insert(orderVendors).values(assignmentRows), db.insert(payments).values(advanceRow)]);
+      } else if (assignmentRows.length) {
+        await db.batch([db.insert(orders).values(row), db.insert(orderVendors).values(assignmentRows)]);
+      } else if (advanceRow) {
+        await db.batch([db.insert(orders).values(row), db.insert(payments).values(advanceRow)]);
+      } else {
+        await db.insert(orders).values(row);
+      }
+      return Response.json({ record: row, payment: advanceRow }, { status: 201 });
     }
 
     if (type === "orderVendor") {
@@ -621,6 +700,9 @@ export async function PATCH(request: Request) {
     if (invalidDate(payload, ["eventDate"])) {
       return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
     }
+    const pickupFromGodown = asBoolean(payload.pickupFromGodown);
+    const scheduleError = orderScheduleError(payload, pickupFromGodown);
+    if (scheduleError) return Response.json({ error: scheduleError }, { status: 400 });
 
     const customerId = clean(payload.customerId);
     const salespersonId = clean(payload.salespersonId);
@@ -636,7 +718,21 @@ export async function PATCH(request: Request) {
       const supervisorPerson = await findSupervisorPerson(db, user.personId, user.email);
       if (!supervisorPerson) return Response.json({ error: "Supervisor profile is not linked to a Person record" }, { status: 400 });
       if (existingOrder.assignedPersonId !== supervisorPerson.id || ["Completed", "Cancelled"].includes(existingOrder.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
-      const updates = { title: clean(payload.title), venue: clean(payload.venue), eventDate: clean(payload.eventDate), status: clean(payload.status) || existingOrder.status };
+      const updates = {
+        title: clean(payload.title),
+        venue: clean(payload.venue),
+        eventDate: clean(payload.eventDate),
+        deliveryAddress: clean(payload.deliveryAddress),
+        deliveryDate: clean(payload.deliveryDate),
+        deliveryTime: clean(payload.deliveryTime),
+        pickupDate: clean(payload.pickupDate),
+        pickupTime: clean(payload.pickupTime),
+        pickupAddress: clean(payload.pickupAddress),
+        pickupFromGodown,
+        contactPerson: clean(payload.contactPerson),
+        contactPhone: clean(payload.contactPhone),
+        status: clean(payload.status) || existingOrder.status,
+      };
       await db.update(orders).set(updates).where(eq(orders.id, id));
       return Response.json({ record: { ...existingOrder, ...updates, salespersonId: existingOrder.salespersonId, assignedPersonId: existingOrder.assignedPersonId, contractValue: 0 } });
     }
@@ -658,6 +754,20 @@ export async function PATCH(request: Request) {
       assignedPersonId,
       venue: clean(payload.venue),
       eventDate: clean(payload.eventDate),
+      deliveryAddress: clean(payload.deliveryAddress),
+      deliveryDate: clean(payload.deliveryDate),
+      deliveryTime: clean(payload.deliveryTime),
+      pickupDate: clean(payload.pickupDate),
+      pickupTime: clean(payload.pickupTime),
+      pickupAddress: clean(payload.pickupAddress),
+      pickupFromGodown,
+      contactPerson: clean(payload.contactPerson),
+      contactPhone: clean(payload.contactPhone),
+      productName: clean(payload.productName),
+      productPrice: money(payload.productPrice),
+      attachmentKey: clean(payload.attachmentKey) || existingOrder.attachmentKey,
+      attachmentName: clean(payload.attachmentName) || existingOrder.attachmentName,
+      attachmentType: clean(payload.attachmentType) || existingOrder.attachmentType,
       status: clean(payload.status) || "Planned",
       contractValue,
     };

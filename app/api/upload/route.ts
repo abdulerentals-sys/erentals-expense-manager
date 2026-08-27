@@ -32,7 +32,10 @@ export async function POST(request: Request) {
   } catch {
     return Response.json({ error: "Invalid upload request" }, { status: 400 });
   }
-  if (kind !== "expense" || !canCreateRecord(user.role, kind)) {
+  const canUpload = kind === "expense"
+    ? canCreateRecord(user.role, kind)
+    : kind === "order" && ["admin", "sales"].includes(user.role);
+  if (!canUpload) {
     return Response.json({ error: "Your role cannot upload this document" }, { status: 403 });
   }
   if (usesNetlifyStorage()) {
@@ -44,11 +47,13 @@ export async function POST(request: Request) {
     const data = await request.formData();
     const file = data.get("file");
     if (!(file instanceof File)) {
-      return Response.json({ error: "Choose a PDF or image to upload" }, { status: 400 });
+      return Response.json({ error: "Choose a supported document to upload" }, { status: 400 });
     }
-    const allowed = ["application/pdf", "image/jpeg", "image/png", "image/webp"];
+    const allowed = kind === "order"
+      ? ["application/pdf", "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/csv"]
+      : ["application/pdf", "image/jpeg", "image/png", "image/webp"];
     if (!allowed.includes(file.type)) {
-      return Response.json({ error: "Only PDF, JPG, PNG, and WebP files are accepted" }, { status: 400 });
+      return Response.json({ error: kind === "order" ? "Only PDF, XLS, XLSX, and CSV files are accepted" : "Only PDF, JPG, PNG, and WebP files are accepted" }, { status: 400 });
     }
     if (file.size > 10 * 1024 * 1024) {
       return Response.json({ error: "The file must be smaller than 10 MB" }, { status: 400 });

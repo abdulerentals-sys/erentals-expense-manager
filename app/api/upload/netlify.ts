@@ -1,6 +1,7 @@
 import { getStore } from "@netlify/blobs";
 
-const allowedTypes = ["application/pdf", "image/jpeg", "image/png", "image/webp"];
+const receiptTypes = ["application/pdf", "image/jpeg", "image/png", "image/webp"];
+const orderTypes = ["application/pdf", "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/csv"];
 
 function getDocumentStore() {
   return getStore({ name: "erentals-documents", consistency: "strong" });
@@ -10,11 +11,13 @@ export async function POST(request: Request) {
   try {
     const data = await request.formData();
     const file = data.get("file");
+    const kind = String(data.get("kind") ?? "");
     if (!(file instanceof File)) {
       return Response.json({ error: "Choose a PDF or image to upload" }, { status: 400 });
     }
+    const allowedTypes = kind === "order" ? orderTypes : receiptTypes;
     if (!allowedTypes.includes(file.type)) {
-      return Response.json({ error: "Only PDF, JPG, PNG, and WebP files are accepted" }, { status: 400 });
+      return Response.json({ error: kind === "order" ? "Only PDF, XLS, XLSX, and CSV files are accepted" : "Only PDF, JPG, PNG, and WebP files are accepted" }, { status: 400 });
     }
     if (file.size > 10 * 1024 * 1024) {
       return Response.json({ error: "The file must be smaller than 10 MB" }, { status: 400 });

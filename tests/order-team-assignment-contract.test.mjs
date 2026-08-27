@@ -16,7 +16,7 @@ test("order titles are optional across the form and both storage APIs", async ()
   assert.doesNotMatch(dashboard, /name="title" required/);
   for (const source of [sitesRoute, mongoRoute]) {
     assert.doesNotMatch(source, /required\(payload, \["title", "customerId"/);
-    assert.match(source, /required\(payload, \["customerId", "salespersonId", "assignedPersonId", "eventDate"\]\)/);
+    assert.match(source, /required\(payload, \["customerId", "assignedPersonId", "eventDate"\]\)/);
   }
 });
 

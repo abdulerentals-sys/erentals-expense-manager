@@ -47,6 +47,20 @@ type Order = {
   assignedPersonId: string;
   venue: string;
   eventDate: string;
+  deliveryAddress: string;
+  deliveryDate: string;
+  deliveryTime: string;
+  pickupDate: string;
+  pickupTime: string;
+  pickupAddress: string;
+  pickupFromGodown: boolean;
+  contactPerson: string;
+  contactPhone: string;
+  productName: string;
+  productPrice: number;
+  attachmentKey: string;
+  attachmentName: string;
+  attachmentType: string;
   status: string;
   contractValue: number;
   createdAt: string;
@@ -173,6 +187,30 @@ function invalidDate(payload: Payload, fields: string[]) {
   return fields.find((field) => !validDate(payload[field]));
 }
 
+function validTime(value: unknown) {
+  return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(clean(value));
+}
+
+function asBoolean(value: unknown) {
+  return value === true || ["true", "on", "1"].includes(clean(value).toLowerCase());
+}
+
+function orderScheduleError(payload: Payload, pickupFromGodown: boolean) {
+  const missing = required(payload, ["deliveryDate", "deliveryTime", "pickupDate", "pickupTime"]);
+  if (missing) return `${missing} is required`;
+  if (invalidDate(payload, ["deliveryDate", "pickupDate"]) || !validTime(payload.deliveryTime) || !validTime(payload.pickupTime)) {
+    return "Enter valid delivery and pickup dates and times";
+  }
+  if (`${clean(payload.pickupDate)}T${clean(payload.pickupTime)}` < `${clean(payload.deliveryDate)}T${clean(payload.deliveryTime)}`) {
+    return "Pickup date and time cannot be before delivery date and time";
+  }
+  if (!pickupFromGodown) {
+    const siteMissing = required(payload, ["deliveryAddress", "pickupAddress", "contactPerson", "contactPhone"]);
+    if (siteMissing) return `${siteMissing} is required unless pickup from godown is selected`;
+  }
+  return "";
+}
+
 function getMongoUri() {
   const uri = process.env.MONGODB_URI?.trim();
   if (!uri) throw new Error("MongoDB storage is not configured");
@@ -250,7 +288,7 @@ async function getMongoDatabase() {
   const db = client.db(databaseName);
   const collections = getCollections(db);
   await ensureMongoIndexes(collections);
-  return { collections };
+  return { client, collections };
 }
 
 async function findById<T extends { id: string }>(
@@ -288,7 +326,24 @@ export async function GET() {
       personId: payment.personId || "",
       vendorId: payment.vendorId || "",
     }));
-    return Response.json({ customers, persons, vendors, vendorProducts, orders, orderVendors, invoices, expenses, payments: normalizedPayments });
+    const normalizedOrders = orders.map((order) => ({
+      ...order,
+      deliveryAddress: order.deliveryAddress || "",
+      deliveryDate: order.deliveryDate || order.eventDate,
+      deliveryTime: order.deliveryTime || "",
+      pickupDate: order.pickupDate || order.eventDate,
+      pickupTime: order.pickupTime || "",
+      pickupAddress: order.pickupAddress || "",
+      pickupFromGodown: Boolean(order.pickupFromGodown),
+      contactPerson: order.contactPerson || "",
+      contactPhone: order.contactPhone || "",
+      productName: order.productName || "",
+      productPrice: order.productPrice || 0,
+      attachmentKey: order.attachmentKey || "",
+      attachmentName: order.attachmentName || "",
+      attachmentType: order.attachmentType || "",
+    }));
+    return Response.json({ customers, persons, vendors, vendorProducts, orders: normalizedOrders, orderVendors, invoices, expenses, payments: normalizedPayments });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Unable to load records" },
@@ -303,7 +358,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
     const type = clean(body.type);
     const payload = body.payload ?? {};
     const userRole = context.userRole;
-    const { collections } = await getMongoDatabase();
+    const { client, collections } = await getMongoDatabase();
     const createdAt = now();
 
     if (type === "customer") {
@@ -375,14 +430,19 @@ export async function POST(request: Request, context: RequestContext = { userRol
     }
 
     if (type === "order") {
-      const missing = required(payload, ["customerId", "salespersonId", "assignedPersonId", "eventDate"]);
+      const missing = required(payload, ["customerId", "assignedPersonId", "eventDate"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       if (invalidDate(payload, ["eventDate"])) {
         return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
       }
       const customerId = clean(payload.customerId);
-      const salespersonId = clean(payload.salespersonId);
+      const salespersonId = userRole === "sales" ? context.userPersonId : clean(payload.salespersonId);
       const assignedPersonId = clean(payload.assignedPersonId);
+      if (!salespersonId && userRole === "sales") throw new FormError("Sales dashboard is not linked to a People record");
+      if (!salespersonId) throw new FormError("salespersonId is required");
+      const pickupFromGodown = asBoolean(payload.pickupFromGodown);
+      const scheduleError = orderScheduleError(payload, pickupFromGodown);
+      if (scheduleError) throw new FormError(scheduleError);
       const [customer, salesperson, assignedPerson] = await Promise.all([
         findById(collections.customers, customerId),
         findById(collections.persons, salespersonId),
@@ -398,6 +458,11 @@ export async function POST(request: Request, context: RequestContext = { userRol
       if (!contractValue) {
         return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
       }
+      const advancePayment = money(payload.advancePayment);
+      if (advancePayment > contractValue) throw new FormError("Advance payment cannot exceed the order value");
+      if (advancePayment && (invalidDate(payload, ["advancePaymentDate"]) || !clean(payload.advancePaymentMethod))) {
+        throw new FormError("Enter the advance payment date and method");
+      }
       const row: Order = {
         id: crypto.randomUUID(),
         orderNo: clean(payload.orderNo) || `ORD-${Date.now().toString().slice(-6)}`,
@@ -407,6 +472,20 @@ export async function POST(request: Request, context: RequestContext = { userRol
         assignedPersonId,
         venue: clean(payload.venue),
         eventDate: clean(payload.eventDate),
+        deliveryAddress: clean(payload.deliveryAddress),
+        deliveryDate: clean(payload.deliveryDate),
+        deliveryTime: clean(payload.deliveryTime),
+        pickupDate: clean(payload.pickupDate),
+        pickupTime: clean(payload.pickupTime),
+        pickupAddress: clean(payload.pickupAddress),
+        pickupFromGodown,
+        contactPerson: clean(payload.contactPerson),
+        contactPhone: clean(payload.contactPhone),
+        productName: clean(payload.productName),
+        productPrice: money(payload.productPrice),
+        attachmentKey: clean(payload.attachmentKey),
+        attachmentName: clean(payload.attachmentName),
+        attachmentType: clean(payload.attachmentType),
         status: clean(payload.status) || "Planned",
         contractValue,
         createdAt,
@@ -416,9 +495,34 @@ export async function POST(request: Request, context: RequestContext = { userRol
       const uniqueVendorIds = [...new Set(assignments.map((item) => item.vendorId))];
       const validVendorCount = uniqueVendorIds.length ? await collections.vendors.countDocuments({ id: { $in: uniqueVendorIds } }) : 0;
       if (validVendorCount !== uniqueVendorIds.length) throw new FormError("Select valid vendors for the order");
-      await collections.orders.insertOne(row);
-      if (assignments.length) await collections.orderVendors.insertMany(assignments.map((assignment) => ({ id: crypto.randomUUID(), orderId: row.id, productId: "", productType: "Quantity-wise" as const, pricingBasis: "Per event" as const, unitRate: assignment.amount, quantity: 1, measurement: 1, rentalDays: 1, ...assignment, createdAt })));
-      return Response.json({ record: row }, { status: 201 });
+      const assignmentRows = assignments.map((assignment) => ({ id: crypto.randomUUID(), orderId: row.id, productId: "", productType: "Quantity-wise" as const, pricingBasis: "Per event" as const, unitRate: assignment.amount, quantity: 1, measurement: 1, rentalDays: 1, ...assignment, createdAt }));
+      const advanceRow: Payment | null = advancePayment ? {
+        id: crypto.randomUUID(),
+        orderId: row.id,
+        manualOrderId: "",
+        personId: "",
+        vendorId: "",
+        invoiceId: "",
+        customerId,
+        direction: "Received",
+        amount: advancePayment,
+        paymentDate: clean(payload.advancePaymentDate),
+        method: clean(payload.advancePaymentMethod),
+        reference: clean(payload.advanceReference),
+        notes: clean(payload.advanceNotes) || "Advance payment received during order creation",
+        createdAt,
+      } : null;
+      const session = client.startSession();
+      try {
+        await session.withTransaction(async () => {
+          await collections.orders.insertOne(row, { session });
+          if (assignmentRows.length) await collections.orderVendors.insertMany(assignmentRows, { session });
+          if (advanceRow) await collections.payments.insertOne(advanceRow, { session });
+        });
+      } finally {
+        await session.endSession();
+      }
+      return Response.json({ record: row, payment: advanceRow }, { status: 201 });
     }
 
     if (type === "orderVendor") {
@@ -739,6 +843,9 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
     if (invalidDate(payload, ["eventDate"])) {
       return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
     }
+    const pickupFromGodown = asBoolean(payload.pickupFromGodown);
+    const scheduleError = orderScheduleError(payload, pickupFromGodown);
+    if (scheduleError) throw new FormError(scheduleError);
 
     const customerId = clean(payload.customerId);
     const salespersonId = clean(payload.salespersonId);
@@ -754,7 +861,21 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       const supervisorPerson = await findSupervisorPerson(collections, context);
       if (!supervisorPerson) throw new FormError("Supervisor profile is not linked to a Person record");
       if (existingOrder.assignedPersonId !== supervisorPerson.id || ["Completed", "Cancelled"].includes(existingOrder.status)) throw new FormError("Supervisor actions require an active assigned order");
-      const updates = { title: clean(payload.title), venue: clean(payload.venue), eventDate: clean(payload.eventDate), status: clean(payload.status) || existingOrder.status };
+      const updates = {
+        title: clean(payload.title),
+        venue: clean(payload.venue),
+        eventDate: clean(payload.eventDate),
+        deliveryAddress: clean(payload.deliveryAddress),
+        deliveryDate: clean(payload.deliveryDate),
+        deliveryTime: clean(payload.deliveryTime),
+        pickupDate: clean(payload.pickupDate),
+        pickupTime: clean(payload.pickupTime),
+        pickupAddress: clean(payload.pickupAddress),
+        pickupFromGodown,
+        contactPerson: clean(payload.contactPerson),
+        contactPhone: clean(payload.contactPhone),
+        status: clean(payload.status) || existingOrder.status,
+      };
       await collections.orders.updateOne({ id }, { $set: updates });
       return Response.json({ record: { ...existingOrder, ...updates, salespersonId: existingOrder.salespersonId, assignedPersonId: existingOrder.assignedPersonId, contractValue: 0 } });
     }
@@ -775,6 +896,20 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       assignedPersonId,
       venue: clean(payload.venue),
       eventDate: clean(payload.eventDate),
+      deliveryAddress: clean(payload.deliveryAddress),
+      deliveryDate: clean(payload.deliveryDate),
+      deliveryTime: clean(payload.deliveryTime),
+      pickupDate: clean(payload.pickupDate),
+      pickupTime: clean(payload.pickupTime),
+      pickupAddress: clean(payload.pickupAddress),
+      pickupFromGodown,
+      contactPerson: clean(payload.contactPerson),
+      contactPhone: clean(payload.contactPhone),
+      productName: clean(payload.productName),
+      productPrice: money(payload.productPrice),
+      attachmentKey: clean(payload.attachmentKey) || existingOrder.attachmentKey,
+      attachmentName: clean(payload.attachmentName) || existingOrder.attachmentName,
+      attachmentType: clean(payload.attachmentType) || existingOrder.attachmentType,
       status: clean(payload.status) || "Planned",
       contractValue,
     };

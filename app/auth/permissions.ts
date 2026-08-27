@@ -78,7 +78,7 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
     const allOrderIds = new Set(ownOrders.map((order) => String(order.id ?? "")));
     const activeCustomerIds = new Set(activeOrders.map((order) => String(order.customerId ?? "")));
     const allCustomerIds = new Set(ownOrders.map((order) => String(order.customerId ?? "")));
-    const sanitizeOrder = (order: Record<string, unknown>) => ({ ...order, contractValue: 0 });
+    const sanitizeOrder = (order: Record<string, unknown>) => ({ ...order, contractValue: 0, productPrice: 0, attachmentKey: "", attachmentName: "", attachmentType: "" });
     const customers = Array.isArray(data.customers) ? data.customers as Array<Record<string, unknown>> : [];
     const orderVendors = Array.isArray(data.orderVendors) ? data.orderVendors as Array<Record<string, unknown>> : [];
     const vendorProducts = Array.isArray(data.vendorProducts) ? data.vendorProducts as Array<Record<string, unknown>> : [];
