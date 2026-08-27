@@ -14,6 +14,10 @@ test("vendor catalog pricing calculates per event and per day totals", async () 
 
   assert.equal(pricing.calculateTentativeCost(2500, "Per event", 3, 4), 7500);
   assert.equal(pricing.calculateTentativeCost(2500, "Per day", 3, 4), 30000);
+  assert.equal(pricing.calculateTentativeCost(100, "Per event", 12.5, 1), 1250);
+  assert.equal(pricing.normalizeMeasurement(2.6, "Quantity-wise"), 3);
+  assert.equal(pricing.normalizeMeasurement(12.45, "Length-wise"), 12.45);
+  assert.equal(pricing.normalizeMeasurement(80.25, "Area-based"), 80.25);
   assert.equal(pricing.calculateTentativeCost(-10, "Per day", 3, 4), 0);
 });
 

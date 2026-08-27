@@ -28,6 +28,7 @@ export async function POST(request: Request) {
         user = await createUser({
           name: email.split("@")[0].replace(/[._-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
           email,
+          personId: "",
           role: "admin",
           passwordHash: await hashPassword(password),
           mustChangePassword: true,

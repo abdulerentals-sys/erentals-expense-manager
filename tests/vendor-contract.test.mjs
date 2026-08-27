@@ -26,7 +26,7 @@ test("orders support multiple vendor product assignments", async () => {
   ]);
   assert.match(dashboard, /kind === "orderVendor"/);
   assert.match(dashboard, /name="productId"/);
-  assert.match(dashboard, /name="quantity"/);
+  assert.match(dashboard, /name="measurement"/);
   assert.match(dashboard, /name="vendorAssignments"/);
   assert.match(dashboard, /Add another vendor/);
   assert.match(dashboard, /Assign product/);

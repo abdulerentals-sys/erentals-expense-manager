@@ -61,13 +61,17 @@ export function visibleSections(role: UserRole) {
   return sectionsByRole[role];
 }
 
-export function filterRecordData<T extends Record<string, unknown>>(data: T, role: UserRole, userEmail = ""): T {
+export function filterRecordData<T extends Record<string, unknown>>(data: T, role: UserRole, userPersonId = "", legacyUserEmail = ""): T {
   if (role === "admin" || role === "accountant") return data;
   if (role === "supervisor") {
     const people = Array.isArray(data.persons) ? data.persons as Array<Record<string, unknown>> : [];
     const allOrders = Array.isArray(data.orders) ? data.orders as Array<Record<string, unknown>> : [];
-    const normalizedEmail = userEmail.trim().toLowerCase();
-    const supervisorPersonIds = new Set(people.filter((person) => String(person.email ?? "").trim().toLowerCase() === normalizedEmail).map((person) => String(person.id ?? "")));
+    const normalizedEmail = legacyUserEmail.trim().toLowerCase();
+    const supervisorPersonIds = new Set(
+      userPersonId
+        ? people.filter((person) => String(person.id ?? "") === userPersonId).map((person) => String(person.id ?? ""))
+        : people.filter((person) => normalizedEmail && String(person.email ?? "").trim().toLowerCase() === normalizedEmail).map((person) => String(person.id ?? "")),
+    );
     const ownOrders = allOrders.filter((order) => supervisorPersonIds.has(String(order.assignedPersonId ?? "")));
     const activeOrders = ownOrders.filter((order) => order.status !== "Completed" && order.status !== "Cancelled");
     const activeOrderIds = new Set(activeOrders.map((order) => String(order.id ?? "")));

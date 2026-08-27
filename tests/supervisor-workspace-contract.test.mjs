@@ -11,11 +11,11 @@ test("supervisor workspace is ownership-scoped and has read-only history", async
     read("app/api/records/route.ts"),
   ]);
   assert.match(permissions, /"history"/);
-  assert.match(permissions, /filterRecordData[\s\S]*userEmail/);
+  assert.match(permissions, /filterRecordData[\s\S]*userPersonId[\s\S]*legacyUserEmail/);
   assert.match(permissions, /status !== "Completed"/);
   assert.match(dashboard, /href: "\/history"/);
   assert.match(dashboard, /function SupervisorHistoryPage/);
-  assert.match(route, /filterRecordData\(data, user\.role, user\.email\)/);
+  assert.match(route, /filterRecordData\(data, user\.role, user\.personId, user\.email\)/);
 });
 
 test("supervisors can assign catalog products without viewing or overriding prices", async () => {

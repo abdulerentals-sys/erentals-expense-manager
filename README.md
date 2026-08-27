@@ -70,6 +70,18 @@ backward compatibility, but the standalone invoice workspace and new invoice
 entry workflow have been removed in favor of order-linked accounting.
 
 Administrators create additional accounts from **Team access** in the sidebar.
+Each non-administrator login is linked directly to an active record from
+**People**; the person and login email do not need to match. Salespeople and
+supervisors selected on an order therefore come directly from the team list,
+while the explicit Team access link determines which supervisor dashboard owns
+that order.
+
+Vendor dashboards include an editable product catalog. Products may be priced
+quantity-wise, length-wise, or area-based, with the existing per-day/per-event
+rental basis applied afterward. Deleting a catalog product is a soft deletion,
+so it disappears from new assignments while existing order history remains
+unchanged.
+
 Temporary passwords should be shared through a secure channel, never committed
 to the repository or placed in a public issue.
 

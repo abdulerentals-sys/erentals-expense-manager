@@ -43,9 +43,8 @@ test("new and updated orders persist a salesperson and supervisor from the team"
     assert.match(source, /salespersonId/);
     assert.match(source, /Select a valid salesperson/);
     assert.match(source, /Select a valid supervisor/);
-    assert.match(source, /findUserByEmail/);
-    assert.match(source, /salesUser\.role !== "sales"/);
-    assert.match(source, /supervisorUser\.role !== "supervisor"/);
+    assert.match(source, /Select active team members for the order/);
+    assert.doesNotMatch(source, /must be linked by email/);
   }
 });
 

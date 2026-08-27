@@ -1,5 +1,5 @@
 import { MongoClient, type Collection } from "mongodb";
-import type { NewUser } from "./store";
+import type { NewUser, TeamPerson } from "./store";
 import type { AppUser } from "./types";
 
 let clientPromise: Promise<MongoClient> | null = null;
@@ -37,18 +37,22 @@ async function users(): Promise<Collection<AppUser>> {
   return collection;
 }
 
+function normalizeUser(user: AppUser | null): AppUser | null {
+  return user ? { ...user, personId: user.personId ?? "" } : null;
+}
+
 const options = { projection: { _id: 0 } } as const;
 
 export async function findUserByEmail(email: string) {
-  return (await users()).findOne({ email }, options);
+  return normalizeUser(await (await users()).findOne({ email }, options));
 }
 
 export async function findUserById(id: string) {
-  return (await users()).findOne({ id }, options);
+  return normalizeUser(await (await users()).findOne({ id }, options));
 }
 
 export async function listUsers() {
-  return (await users()).find({}, options).sort({ createdAt: -1 }).toArray();
+  return (await users()).find({}, options).sort({ createdAt: -1 }).toArray().then((rows) => rows.map((row) => normalizeUser(row) as AppUser));
 }
 
 export async function countUsers() {
@@ -61,6 +65,7 @@ export async function createUser(input: NewUser) {
     id: crypto.randomUUID(),
     name: input.name,
     email: input.email,
+    personId: input.personId,
     role: input.role,
     status: "Active",
     passwordHash: input.passwordHash,
@@ -70,6 +75,23 @@ export async function createUser(input: NewUser) {
   };
   await (await users()).insertOne(user);
   return user;
+}
+
+export async function listTeamPersons() {
+  const collection = (await users()).dbName;
+  const client = await clientPromise;
+  if (!client) throw new Error("MongoDB storage is not configured");
+  return client.db(collection).collection<TeamPerson>("persons")
+    .find({ status: "Active" }, { projection: { _id: 0, id: 1, name: 1, role: 1, phone: 1, status: 1 } })
+    .sort({ name: 1 })
+    .toArray();
+}
+
+export async function updateUserPerson(id: string, personId: string) {
+  await (await users()).updateOne(
+    { id },
+    { $set: { personId, updatedAt: new Date().toISOString() } },
+  );
 }
 
 export async function updateUserPassword(id: string, passwordHash: string) {

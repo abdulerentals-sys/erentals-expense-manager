@@ -3,9 +3,18 @@ import type { AppUser, UserRole } from "./types";
 export type NewUser = {
   name: string;
   email: string;
+  personId: string;
   role: UserRole;
   passwordHash: string;
   mustChangePassword: boolean;
+};
+
+export type TeamPerson = {
+  id: string;
+  name: string;
+  role: string;
+  phone: string;
+  status: string;
 };
 
 function usesMongoStorage() {
@@ -34,6 +43,14 @@ export async function countUsers(): Promise<number> {
 
 export async function createUser(input: NewUser): Promise<AppUser> {
   return (await adapter()).createUser(input);
+}
+
+export async function listTeamPersons(): Promise<TeamPerson[]> {
+  return (await adapter()).listTeamPersons();
+}
+
+export async function updateUserPerson(id: string, personId: string): Promise<void> {
+  return (await adapter()).updateUserPerson(id, personId);
 }
 
 export async function updateUserPassword(id: string, passwordHash: string): Promise<void> {

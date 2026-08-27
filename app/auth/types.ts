@@ -7,6 +7,7 @@ export type AppUser = {
   id: string;
   name: string;
   email: string;
+  personId: string;
   role: UserRole;
   status: UserStatus;
   passwordHash: string;
@@ -26,6 +27,7 @@ export function toPublicUser(user: AppUser): PublicUser {
     id: user.id,
     name: user.name,
     email: user.email,
+    personId: user.personId,
     role: user.role,
     status: user.status,
     mustChangePassword: user.mustChangePassword,

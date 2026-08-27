@@ -1,8 +1,7 @@
 import { and, desc, eq, ne, sql } from "drizzle-orm";
 import { canCreateRecord, canRecordPayment, filterRecordData } from "../../auth/permissions";
 import { getSessionUser } from "../../auth/session";
-import { findUserByEmail } from "../../auth/store";
-import { calculateTentativeCost, type PricingBasis } from "../../vendor-pricing";
+import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis } from "../../vendor-pricing";
 import { getDb } from "../../../db";
 import { ensureSchema } from "../../../db/ensure";
 import {
@@ -80,6 +79,15 @@ function usesNetlifyStorage() {
   return typeof process !== "undefined" && Boolean(process.env.MONGODB_URI?.trim());
 }
 
+async function findSupervisorPerson(db: ReturnType<typeof getDb>, personId: string, legacyEmail: string) {
+  if (personId) {
+    const [person] = await db.select().from(persons).where(eq(persons.id, personId)).limit(1);
+    return person;
+  }
+  const [person] = await db.select().from(persons).where(sql`lower(${persons.email}) = ${legacyEmail.toLowerCase()}`).limit(1);
+  return person;
+}
+
 export async function GET() {
   const user = await getSessionUser();
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
@@ -89,7 +97,7 @@ export async function GET() {
     const response = await mongodb.GET();
     if (!response.ok) return response;
     const data = await response.json() as Record<string, unknown>;
-    return Response.json(filterRecordData(data, user.role, user.email));
+    return Response.json(filterRecordData(data, user.role, user.personId, user.email));
   }
 
   try {
@@ -100,7 +108,7 @@ export async function GET() {
         db.select().from(customers).orderBy(desc(customers.createdAt)),
         db.select().from(persons).orderBy(desc(persons.createdAt)),
         db.select().from(vendors).orderBy(desc(vendors.createdAt)),
-        db.select().from(vendorProducts).orderBy(desc(vendorProducts.createdAt)),
+        db.select().from(vendorProducts).where(ne(vendorProducts.status, "Deleted")).orderBy(desc(vendorProducts.createdAt)),
         db.select().from(orders).orderBy(desc(orders.createdAt)),
         db.select().from(orderVendors).orderBy(desc(orderVendors.createdAt)),
         db.select().from(invoices).orderBy(desc(invoices.createdAt)),
@@ -126,7 +134,7 @@ export async function GET() {
       invoices: invoiceRows,
       expenses: expenseRows,
       payments: normalizedPayments,
-    }, user.role, user.email));
+    }, user.role, user.personId, user.email));
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Unable to load records" },
@@ -161,7 +169,7 @@ export async function POST(request: Request) {
   }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.POST(request, { userRole: user.role, userEmail: user.email });
+    return mongodb.POST(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email });
   }
 
   try {
@@ -199,7 +207,7 @@ export async function POST(request: Request) {
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       const orderId = clean(payload.orderId);
       if (user.role === "supervisor") {
-        const [supervisorPerson] = await db.select({ id: persons.id }).from(persons).where(sql`lower(${persons.email}) = ${user.email.toLowerCase()}`).limit(1);
+        const supervisorPerson = await findSupervisorPerson(db, user.personId, user.email);
         if (!supervisorPerson) return Response.json({ error: "Supervisor profile is not linked to a Person record" }, { status: 400 });
         const [ownedOrder] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.id, orderId), eq(orders.assignedPersonId, supervisorPerson.id), ne(orders.status, "Completed"), ne(orders.status, "Cancelled"))).limit(1);
         if (!ownedOrder) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
@@ -228,16 +236,18 @@ export async function POST(request: Request) {
     }
 
     if (type === "vendorProduct") {
-      const missing = required(payload, ["vendorId", "name", "pricingBasis", "rentalCharge"]);
+      const missing = required(payload, ["vendorId", "name", "productType", "pricingBasis", "rentalCharge"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       const vendorId = clean(payload.vendorId);
       const pricingBasis = clean(payload.pricingBasis);
+      const productType = clean(payload.productType);
       const rentalCharge = money(payload.rentalCharge);
       const [vendor] = await db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1);
       if (!vendor) return Response.json({ error: "Select a valid vendor" }, { status: 400 });
+      if (!isProductType(productType)) return Response.json({ error: "Select quantity-wise, length-wise or area-based pricing" }, { status: 400 });
       if (!["Per day", "Per event"].includes(pricingBasis)) return Response.json({ error: "Select per-day or per-event pricing" }, { status: 400 });
       if (!rentalCharge) return Response.json({ error: "Rental charge must be greater than zero" }, { status: 400 });
-      const row = { id: crypto.randomUUID(), vendorId, name: clean(payload.name), pricingBasis, rentalCharge, status: "Active", createdAt };
+      const row = { id: crypto.randomUUID(), vendorId, name: clean(payload.name), productType, pricingBasis, rentalCharge, status: "Active", createdAt };
       await db.insert(vendorProducts).values(row);
       return Response.json({ record: row }, { status: 201 });
     }
@@ -253,18 +263,13 @@ export async function POST(request: Request) {
       const assignedPersonId = clean(payload.assignedPersonId);
       const [[customer], [salesperson], [assignedPerson]] = await Promise.all([
         db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1),
-        db.select({ id: persons.id, role: persons.role, email: persons.email }).from(persons).where(eq(persons.id, salespersonId)).limit(1),
-        db.select({ id: persons.id, role: persons.role, email: persons.email }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
+        db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, salespersonId)).limit(1),
+        db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
       ]);
       if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
       if (!isSalesperson(salesperson)) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
       if (!isSupervisor(assignedPerson)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
-      const [salesUser, supervisorUser] = await Promise.all([
-        findUserByEmail(salesperson.email.trim().toLowerCase()),
-        findUserByEmail(assignedPerson.email.trim().toLowerCase()),
-      ]);
-      if (!salesUser || salesUser.role !== "sales" || salesUser.status !== "Active") return Response.json({ error: "The salesperson must be linked by email to an active Sales person dashboard user" }, { status: 400 });
-      if (!supervisorUser || supervisorUser.role !== "supervisor" || supervisorUser.status !== "Active") return Response.json({ error: "The supervisor must be linked by email to an active Supervisor dashboard user" }, { status: 400 });
+      if (salesperson.status !== "Active" || assignedPerson.status !== "Active") return Response.json({ error: "Select active team members for the order" }, { status: 400 });
       const contractValue = money(payload.contractValue);
       if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
       const row = {
@@ -294,7 +299,7 @@ export async function POST(request: Request) {
     }
 
     if (type === "orderVendor") {
-      const missing = required(payload, ["orderId", "vendorId", "productId", "quantity"]);
+      const missing = required(payload, ["orderId", "vendorId", "productId"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       const orderId = clean(payload.orderId); const vendorId = clean(payload.vendorId); const productId = clean(payload.productId);
       const [[order], [vendor], [product]] = await Promise.all([
@@ -306,18 +311,21 @@ export async function POST(request: Request) {
       if (!vendor) return Response.json({ error: "Select a valid vendor" }, { status: 400 });
       if (!product || product.vendorId !== vendorId) return Response.json({ error: "Select a product listed by this vendor" }, { status: 400 });
       if (user.role === "supervisor") {
-        const [supervisorPerson] = await db.select({ id: persons.id }).from(persons).where(sql`lower(${persons.email}) = ${user.email.toLowerCase()}`).limit(1);
+        const supervisorPerson = await findSupervisorPerson(db, user.personId, user.email);
         if (!supervisorPerson) return Response.json({ error: "Supervisor profile is not linked to a Person record" }, { status: 400 });
         const [ownedOrder] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.id, orderId), eq(orders.assignedPersonId, supervisorPerson.id), ne(orders.status, "Completed"), ne(orders.status, "Cancelled"))).limit(1);
         if (!ownedOrder) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       }
-      const quantity = positiveInteger(payload.quantity);
+      const productType = isProductType(product.productType) ? product.productType : "Quantity-wise";
+      const measurement = normalizeMeasurement(payload.measurement ?? payload.quantity, productType);
+      if (!measurement) return Response.json({ error: `Enter a valid ${productType === "Quantity-wise" ? "quantity" : productType === "Length-wise" ? "length" : "area"}` }, { status: 400 });
+      const quantity = productType === "Quantity-wise" ? Math.round(measurement) : 1;
       const rentalDays = product.pricingBasis === "Per day" ? positiveInteger(payload.rentalDays) : 1;
-      const calculatedAmount = calculateTentativeCost(product.rentalCharge, product.pricingBasis as PricingBasis, quantity, rentalDays);
+      const calculatedAmount = calculateTentativeCost(product.rentalCharge, product.pricingBasis as PricingBasis, measurement, rentalDays);
       const requestedAmount = money(payload.amount);
       const amount = userRole === "supervisor" ? calculatedAmount : requestedAmount || calculatedAmount;
       const productName = product.name;
-      const assignment = { productId, productName, pricingBasis: product.pricingBasis, unitRate: product.rentalCharge, quantity, rentalDays, amount, notes: clean(payload.notes) };
+      const assignment = { productId, productName, productType, pricingBasis: product.pricingBasis, unitRate: product.rentalCharge, quantity, measurement, rentalDays, amount, notes: clean(payload.notes) };
       const [existing] = await db.select().from(orderVendors).where(and(eq(orderVendors.orderId, orderId), eq(orderVendors.productId, productId))).limit(1);
       if (existing && user.role !== "supervisor") {
         await db.update(orderVendors).set(assignment).where(eq(orderVendors.id, existing.id));
@@ -392,7 +400,7 @@ export async function POST(request: Request) {
       const orderId = clean(payload.orderId);
       let personId = clean(payload.personId);
       if (user.role === "supervisor") {
-        const [supervisorPerson] = await db.select({ id: persons.id }).from(persons).where(sql`lower(${persons.email}) = ${user.email.toLowerCase()}`).limit(1);
+        const supervisorPerson = await findSupervisorPerson(db, user.personId, user.email);
         if (!supervisorPerson) return Response.json({ error: "Supervisor profile is not linked to a Person record" }, { status: 400 });
         const [ownedOrder] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.id, orderId), eq(orders.assignedPersonId, supervisorPerson.id), ne(orders.status, "Completed"), ne(orders.status, "Cancelled"))).limit(1);
         if (!ownedOrder) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
@@ -509,7 +517,7 @@ export async function PATCH(request: Request) {
   const type = clean(body.type);
   const id = clean(body.id);
   const payload = body.payload ?? {};
-  if (!id || !["order", "payment"].includes(type)) {
+  if (!id || !["order", "payment", "vendorProduct"].includes(type)) {
     return Response.json({ error: "Select a valid record to edit" }, { status: 400 });
   }
   if (type === "order" && !["admin", "supervisor"].includes(user.role)) {
@@ -518,14 +526,38 @@ export async function PATCH(request: Request) {
   if (type === "payment" && !canRecordPayment(user.role, clean(payload.direction))) {
     return Response.json({ error: "Your role cannot edit this payment" }, { status: 403 });
   }
+  if (type === "vendorProduct" && !canCreateRecord(user.role, "vendorProduct")) {
+    return Response.json({ error: "Your role cannot edit vendor products" }, { status: 403 });
+  }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.PATCH(request, { userRole: user.role, userEmail: user.email });
+    return mongodb.PATCH(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email });
   }
 
   try {
     await ensureSchema();
     const db = getDb();
+
+    if (type === "vendorProduct") {
+      const missing = required(payload, ["vendorId", "name", "productType", "pricingBasis", "rentalCharge"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      const vendorId = clean(payload.vendorId);
+      const productType = clean(payload.productType);
+      const pricingBasis = clean(payload.pricingBasis);
+      const rentalCharge = money(payload.rentalCharge);
+      const [[existingProduct], [vendor]] = await Promise.all([
+        db.select().from(vendorProducts).where(and(eq(vendorProducts.id, id), ne(vendorProducts.status, "Deleted"))).limit(1),
+        db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1),
+      ]);
+      if (!existingProduct) return Response.json({ error: "Vendor product not found" }, { status: 404 });
+      if (!vendor) return Response.json({ error: "Select a valid vendor" }, { status: 400 });
+      if (!isProductType(productType)) return Response.json({ error: "Select quantity-wise, length-wise or area-based pricing" }, { status: 400 });
+      if (!["Per day", "Per event"].includes(pricingBasis)) return Response.json({ error: "Select per-day or per-event pricing" }, { status: 400 });
+      if (!rentalCharge) return Response.json({ error: "Rental charge must be greater than zero" }, { status: 400 });
+      const updates = { vendorId, name: clean(payload.name), productType, pricingBasis, rentalCharge };
+      await db.update(vendorProducts).set(updates).where(eq(vendorProducts.id, id));
+      return Response.json({ record: { ...existingProduct, ...updates } });
+    }
 
     if (type === "payment") {
       const missing = required(payload, ["direction", "orderId", "amount", "paymentDate", "method"]);
@@ -582,12 +614,12 @@ export async function PATCH(request: Request) {
     const [[existingOrder], [customer], [salesperson], [assignedPerson]] = await Promise.all([
       db.select().from(orders).where(eq(orders.id, id)).limit(1),
       db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1),
-      db.select({ id: persons.id, role: persons.role, email: persons.email }).from(persons).where(eq(persons.id, salespersonId)).limit(1),
-      db.select({ id: persons.id, role: persons.role, email: persons.email }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
+      db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, salespersonId)).limit(1),
+      db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
     ]);
     if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
     if (user.role === "supervisor") {
-      const [supervisorPerson] = await db.select({ id: persons.id }).from(persons).where(sql`lower(${persons.email}) = ${user.email.toLowerCase()}`).limit(1);
+      const supervisorPerson = await findSupervisorPerson(db, user.personId, user.email);
       if (!supervisorPerson) return Response.json({ error: "Supervisor profile is not linked to a Person record" }, { status: 400 });
       if (existingOrder.assignedPersonId !== supervisorPerson.id || ["Completed", "Cancelled"].includes(existingOrder.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       const updates = { title: clean(payload.title), venue: clean(payload.venue), eventDate: clean(payload.eventDate), status: clean(payload.status) || existingOrder.status };
@@ -597,12 +629,7 @@ export async function PATCH(request: Request) {
     if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
     if (!isSalesperson(salesperson)) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
     if (!isSupervisor(assignedPerson)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
-    const [salesUser, supervisorUser] = await Promise.all([
-      findUserByEmail(salesperson.email.trim().toLowerCase()),
-      findUserByEmail(assignedPerson.email.trim().toLowerCase()),
-    ]);
-    if (!salesUser || salesUser.role !== "sales" || salesUser.status !== "Active") return Response.json({ error: "The salesperson must be linked by email to an active Sales person dashboard user" }, { status: 400 });
-    if (!supervisorUser || supervisorUser.role !== "supervisor" || supervisorUser.status !== "Active") return Response.json({ error: "The supervisor must be linked by email to an active Supervisor dashboard user" }, { status: 400 });
+    if (salesperson.status !== "Active" || assignedPerson.status !== "Active") return Response.json({ error: "Select active team members for the order" }, { status: 400 });
     const contractValue = money(payload.contractValue);
     if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
 
@@ -621,7 +648,36 @@ export async function PATCH(request: Request) {
     return Response.json({ record: { ...existingOrder, ...updates } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update record";
-    const friendly = message.includes("UNIQUE") ? "That order number already exists" : message;
+    const friendly = message.includes("UNIQUE") ? "That reference already exists" : message;
     return Response.json({ error: friendly }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: Request) {
+  const user = await getSessionUser();
+  if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
+  if (user.mustChangePassword) return Response.json({ error: "Change your temporary password before using the dashboard" }, { status: 403 });
+  if (!canCreateRecord(user.role, "vendorProduct")) return Response.json({ error: "Your role cannot delete vendor products" }, { status: 403 });
+  let body: { type?: string; id?: string };
+  try {
+    body = await request.clone().json() as typeof body;
+  } catch {
+    return Response.json({ error: "Invalid request" }, { status: 400 });
+  }
+  const id = clean(body.id);
+  if (clean(body.type) !== "vendorProduct" || !id) return Response.json({ error: "Select a valid vendor product" }, { status: 400 });
+  if (usesNetlifyStorage()) {
+    const mongodb = await import("./mongodb");
+    return mongodb.DELETE(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email });
+  }
+  try {
+    await ensureSchema();
+    const db = getDb();
+    const [product] = await db.select().from(vendorProducts).where(and(eq(vendorProducts.id, id), ne(vendorProducts.status, "Deleted"))).limit(1);
+    if (!product) return Response.json({ error: "Vendor product not found" }, { status: 404 });
+    await db.update(vendorProducts).set({ status: "Deleted" }).where(eq(vendorProducts.id, id));
+    return Response.json({ record: { ...product, status: "Deleted" } });
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : "Unable to delete vendor product" }, { status: 500 });
   }
 }

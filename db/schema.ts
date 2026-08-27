@@ -1,9 +1,10 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   email: text("email").notNull().unique(),
+  personId: text("person_id").notNull().default(""),
   role: text("role").notNull(),
   status: text("status").notNull().default("Active"),
   passwordHash: text("password_hash").notNull(),
@@ -53,6 +54,7 @@ export const vendorProducts = sqliteTable("vendor_products", {
   id: text("id").primaryKey(),
   vendorId: text("vendor_id").notNull(),
   name: text("name").notNull(),
+  productType: text("product_type").notNull().default("Quantity-wise"),
   pricingBasis: text("pricing_basis").notNull(),
   rentalCharge: integer("rental_charge").notNull(),
   status: text("status").notNull().default("Active"),
@@ -79,9 +81,11 @@ export const orderVendors = sqliteTable("order_vendors", {
   vendorId: text("vendor_id").notNull(),
   productId: text("product_id").notNull().default(""),
   productName: text("product_name").notNull(),
+  productType: text("product_type").notNull().default("Quantity-wise"),
   pricingBasis: text("pricing_basis").notNull().default("Per event"),
   unitRate: integer("unit_rate").notNull().default(0),
   quantity: integer("quantity").notNull().default(1),
+  measurement: real("measurement").notNull().default(1),
   rentalDays: integer("rental_days").notNull().default(1),
   amount: integer("amount").notNull(),
   notes: text("notes").notNull().default(""),
