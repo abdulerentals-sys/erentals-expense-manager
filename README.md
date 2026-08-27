@@ -59,11 +59,13 @@ new account must replace its temporary password at first sign-in.
   receipts (vendor payouts are not permitted)
 
 The order dashboard includes a complete chronological history of vendor
-assignments, expenses, customer receipts, and vendor payments. Every payment is
-linked to an order ID; the selected order supplies the customer, while outgoing
-payments also require a vendor assigned to that order. Administrators and
-accountants may edit customer receipts and vendor payouts. Sales people may edit
-customer receipts only.
+assignments, expenses, customer receipts, and vendor payments. After a customer
+is selected for a receipt, every order for that customer is available to Admin,
+Accountant, and Sales users, including completed and cancelled orders. A manual
+Order ID can be stored for a customer receipt when the referenced order is not
+listed. Outgoing payments still require a real order with that vendor assigned.
+Administrators and accountants may edit customer receipts and vendor payouts.
+Sales people may edit customer receipts only.
 
 Existing invoice records and their legacy database storage remain untouched for
 backward compatibility, but the standalone invoice workspace and new invoice
@@ -71,10 +73,11 @@ entry workflow have been removed in favor of order-linked accounting.
 
 Administrators create additional accounts from **Team access** in the sidebar.
 Each non-administrator login is linked directly to an active record from
-**People**; the person and login email do not need to match. Salespeople and
-supervisors selected on an order therefore come directly from the team list,
-while the explicit Team access link determines which supervisor dashboard owns
-that order.
+**People**; the person and login email do not need to match. Order assignment
+lists include every active People record whose People role is Sales or
+Supervisor-related, plus active generic team members explicitly linked to a
+Sales or Supervisor Team Access account. The explicit link also determines which
+supervisor dashboard owns that order.
 
 Vendor dashboards include an editable product catalog. Products may be priced
 quantity-wise, length-wise, or area-based, with the existing per-day/per-event

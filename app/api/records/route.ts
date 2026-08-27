@@ -1,6 +1,8 @@
 import { and, desc, eq, ne, sql } from "drizzle-orm";
 import { canCreateRecord, canRecordPayment, filterRecordData } from "../../auth/permissions";
 import { getSessionUser } from "../../auth/session";
+import { listUsers } from "../../auth/store";
+import { isOrderTeamPerson, type TeamAssignment } from "../../auth/team";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis } from "../../vendor-pricing";
 import { getDb } from "../../../db";
 import { ensureSchema } from "../../../db/ensure";
@@ -42,11 +44,11 @@ function paymentAllocations(payload: Record<string, unknown>): PaymentAllocation
     try { raw = JSON.parse(raw); } catch { return []; }
   }
   if (Array.isArray(raw)) {
-    return raw.map((item) => ({ orderId: clean((item as Record<string, unknown>).orderId), amount: money((item as Record<string, unknown>).amount) })).filter((item) => item.orderId && item.amount);
+    return raw.map((item) => ({ orderId: clean((item as Record<string, unknown>).orderId), amount: money((item as Record<string, unknown>).amount) })).filter((item) => item.orderId && item.orderId !== "__manual__" && item.amount);
   }
   const orderId = clean(payload.orderId);
   const amount = money(payload.amount);
-  return orderId && amount ? [{ orderId, amount }] : [];
+  return orderId && orderId !== "__manual__" && amount ? [{ orderId, amount }] : [];
 }
 
 function required(payload: Record<string, unknown>, fields: string[]) {
@@ -66,13 +68,8 @@ function invalidDate(payload: Record<string, unknown>, fields: string[]) {
   return fields.find((field) => !validDate(payload[field]));
 }
 
-function isSalesperson<T extends { role: string }>(person: T | undefined): person is T {
-  return Boolean(person?.role.trim().toLowerCase().includes("sales"));
-}
-
-function isSupervisor<T extends { role: string }>(person: T | undefined): person is T {
-  const role = person?.role.trim().toLowerCase() ?? "";
-  return role.includes("supervisor") || role.includes("execution manager");
+async function teamAssignments(): Promise<TeamAssignment[]> {
+  return (await listUsers()).map(({ personId, role, status }) => ({ personId, role, status }));
 }
 
 function usesNetlifyStorage() {
@@ -96,14 +93,14 @@ export async function GET() {
     const mongodb = await import("./mongodb");
     const response = await mongodb.GET();
     if (!response.ok) return response;
-    const data = await response.json() as Record<string, unknown>;
+    const data = { ...(await response.json() as Record<string, unknown>), teamAssignments: await teamAssignments() };
     return Response.json(filterRecordData(data, user.role, user.personId, user.email));
   }
 
   try {
     await ensureSchema();
     const db = getDb();
-    const [customerRows, personRows, vendorRows, vendorProductRows, orderRows, orderVendorRows, invoiceRows, expenseRows, paymentRows] =
+    const [customerRows, personRows, vendorRows, vendorProductRows, orderRows, orderVendorRows, invoiceRows, expenseRows, paymentRows, assignmentRows] =
       await Promise.all([
         db.select().from(customers).orderBy(desc(customers.createdAt)),
         db.select().from(persons).orderBy(desc(persons.createdAt)),
@@ -114,12 +111,14 @@ export async function GET() {
         db.select().from(invoices).orderBy(desc(invoices.createdAt)),
         db.select().from(expenses).orderBy(desc(expenses.createdAt)),
         db.select().from(payments).orderBy(desc(payments.createdAt)),
+        teamAssignments(),
       ]);
 
     const orderByInvoice = new Map(invoiceRows.map((invoice) => [invoice.id, invoice.orderId]));
     const normalizedPayments = paymentRows.map((payment) => ({
       ...payment,
       orderId: payment.orderId || orderByInvoice.get(payment.invoiceId) || "",
+      manualOrderId: payment.manualOrderId || "",
       personId: payment.personId || "",
       vendorId: payment.vendorId || "",
     }));
@@ -134,6 +133,7 @@ export async function GET() {
       invoices: invoiceRows,
       expenses: expenseRows,
       payments: normalizedPayments,
+      teamAssignments: assignmentRows,
     }, user.role, user.personId, user.email));
   } catch (error) {
     return Response.json(
@@ -169,7 +169,7 @@ export async function POST(request: Request) {
   }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.POST(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email });
+    return mongodb.POST(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email, teamAssignments: await teamAssignments() });
   }
 
   try {
@@ -266,10 +266,13 @@ export async function POST(request: Request) {
         db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, salespersonId)).limit(1),
         db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
       ]);
+      const assignmentsForTeam = await teamAssignments();
       if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
-      if (!isSalesperson(salesperson)) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
-      if (!isSupervisor(assignedPerson)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
+      if (!salesperson) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
+      if (!assignedPerson) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
       if (salesperson.status !== "Active" || assignedPerson.status !== "Active") return Response.json({ error: "Select active team members for the order" }, { status: 400 });
+      if (!isOrderTeamPerson(salesperson, "salesperson", assignmentsForTeam)) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
+      if (!isOrderTeamPerson(assignedPerson, "supervisor", assignmentsForTeam)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
       const contractValue = money(payload.contractValue);
       if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
       const row = {
@@ -452,8 +455,12 @@ export async function POST(request: Request) {
       const personId = "";
       const customerId = direction === "Received" ? clean(payload.customerId) : "";
       const vendorId = direction === "Paid" ? clean(payload.vendorId) : "";
+      const rawManualOrderId = clean(payload.manualOrderId);
+      const manualOrderId = direction === "Received" ? rawManualOrderId : "";
       const allocations = paymentAllocations(payload);
-      if (!allocations.length) return Response.json({ error: "Select at least one order and enter its allocation" }, { status: 400 });
+      if (rawManualOrderId && direction !== "Received") return Response.json({ error: "Manual Order ID is only available for customer receipts" }, { status: 400 });
+      if (manualOrderId && allocations.length) return Response.json({ error: "Choose either a listed order or a manual Order ID" }, { status: 400 });
+      if (!manualOrderId && !allocations.length) return Response.json({ error: "Select at least one order or enter a manual Order ID" }, { status: 400 });
       if (new Set(allocations.map((item) => item.orderId)).size !== allocations.length) return Response.json({ error: "Each order can only be selected once" }, { status: 400 });
       if (direction === "Received" && !customerId) {
         return Response.json({ error: "Select the customer" }, { status: 400 });
@@ -471,7 +478,7 @@ export async function POST(request: Request) {
       }
       const amount = money(payload.amount);
       if (!amount) return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
-      if (allocations.reduce((sum, item) => sum + item.amount, 0) !== amount) return Response.json({ error: "Allocation total must equal the payment amount" }, { status: 400 });
+      if (!manualOrderId && allocations.reduce((sum, item) => sum + item.amount, 0) !== amount) return Response.json({ error: "Allocation total must equal the payment amount" }, { status: 400 });
       const linkedOrders = await Promise.all(allocations.map(async (allocation) => {
         const [order] = await db.select().from(orders).where(eq(orders.id, allocation.orderId)).limit(1);
         return order;
@@ -485,8 +492,8 @@ export async function POST(request: Request) {
         }));
         if (assigned.some((value) => !value)) return Response.json({ error: "Vendor is not assigned to every selected order" }, { status: 400 });
       }
-      const rows = allocations.map((allocation, index) => ({
-        id: crypto.randomUUID(), orderId: allocation.orderId, personId, vendorId, invoiceId: "", customerId: direction === "Received" ? customerId : linkedOrders[index]!.customerId, direction, amount: allocation.amount,
+      const rows = (manualOrderId ? [{ orderId: "", amount }] : allocations).map((allocation, index) => ({
+        id: crypto.randomUUID(), orderId: allocation.orderId, manualOrderId, personId, vendorId, invoiceId: "", customerId: direction === "Received" ? customerId : linkedOrders[index]!.customerId, direction, amount: allocation.amount,
         paymentDate: clean(payload.paymentDate), method: clean(payload.method), reference: clean(payload.reference), notes: clean(payload.notes), createdAt,
       }));
       await db.insert(payments).values(rows);
@@ -531,7 +538,7 @@ export async function PATCH(request: Request) {
   }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.PATCH(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email });
+    return mongodb.PATCH(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email, teamAssignments: await teamAssignments() });
   }
 
   try {
@@ -560,27 +567,33 @@ export async function PATCH(request: Request) {
     }
 
     if (type === "payment") {
-      const missing = required(payload, ["direction", "orderId", "amount", "paymentDate", "method"]);
+      const missing = required(payload, ["direction", "amount", "paymentDate", "method"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       if (invalidDate(payload, ["paymentDate"])) return Response.json({ error: "Enter a valid payment date" }, { status: 400 });
       const direction = clean(payload.direction);
-      const orderId = clean(payload.orderId);
+      if (!["Received", "Paid"].includes(direction)) return Response.json({ error: "Select a valid payment type" }, { status: 400 });
+      const rawManualOrderId = clean(payload.manualOrderId);
+      const manualOrderId = direction === "Received" ? rawManualOrderId : "";
+      const orderId = manualOrderId ? "" : clean(payload.orderId);
       const customerId = direction === "Received" ? clean(payload.customerId) : "";
       const vendorId = direction === "Paid" ? clean(payload.vendorId) : "";
       const amount = money(payload.amount);
+      if (rawManualOrderId && direction !== "Received") return Response.json({ error: "Manual Order ID is only available for customer receipts" }, { status: 400 });
+      if (manualOrderId && clean(payload.orderId) && clean(payload.orderId) !== "__manual__") return Response.json({ error: "Choose either a listed order or a manual Order ID" }, { status: 400 });
+      if (!manualOrderId && (!orderId || orderId === "__manual__")) return Response.json({ error: "Select an order or enter a manual Order ID" }, { status: 400 });
       if (!amount) return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
       const [[existingPayment], [order], [customer], [vendor]] = await Promise.all([
         db.select().from(payments).where(eq(payments.id, id)).limit(1),
-        db.select().from(orders).where(eq(orders.id, orderId)).limit(1),
+        orderId ? db.select().from(orders).where(eq(orders.id, orderId)).limit(1) : Promise.resolve([]),
         customerId ? db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1) : Promise.resolve([]),
         vendorId ? db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1) : Promise.resolve([]),
       ]);
       if (!existingPayment) return Response.json({ error: "Payment not found" }, { status: 404 });
       if (user.role === "sales" && existingPayment.direction !== "Received") return Response.json({ error: "Your role cannot edit this payment" }, { status: 403 });
-      if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
+      if (!manualOrderId && !order) return Response.json({ error: "Select a valid order" }, { status: 400 });
       if (direction === "Received") {
         if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
-        if (order.customerId !== customerId) return Response.json({ error: "Customer receipts can only use orders belonging to the selected customer" }, { status: 400 });
+        if (order && order.customerId !== customerId) return Response.json({ error: "Customer receipts can only use orders belonging to the selected customer" }, { status: 400 });
       } else {
         if (!vendor) return Response.json({ error: "Select a valid vendor or payee" }, { status: 400 });
         const [assignment] = await db.select({ id: orderVendors.id }).from(orderVendors).where(and(eq(orderVendors.orderId, orderId), eq(orderVendors.vendorId, vendorId))).limit(1);
@@ -588,9 +601,10 @@ export async function PATCH(request: Request) {
       }
       const updates = {
         orderId,
+        manualOrderId,
         vendorId,
         invoiceId: "",
-        customerId: direction === "Received" ? customerId : order.customerId,
+        customerId: direction === "Received" ? customerId : order!.customerId,
         direction,
         amount,
         paymentDate: clean(payload.paymentDate),
@@ -626,10 +640,13 @@ export async function PATCH(request: Request) {
       await db.update(orders).set(updates).where(eq(orders.id, id));
       return Response.json({ record: { ...existingOrder, ...updates, salespersonId: existingOrder.salespersonId, assignedPersonId: existingOrder.assignedPersonId, contractValue: 0 } });
     }
+    const assignmentsForTeam = await teamAssignments();
     if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
-    if (!isSalesperson(salesperson)) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
-    if (!isSupervisor(assignedPerson)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
+    if (!salesperson) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
+    if (!assignedPerson) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
     if (salesperson.status !== "Active" || assignedPerson.status !== "Active") return Response.json({ error: "Select active team members for the order" }, { status: 400 });
+    if (!isOrderTeamPerson(salesperson, "salesperson", assignmentsForTeam)) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
+    if (!isOrderTeamPerson(assignedPerson, "supervisor", assignmentsForTeam)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
     const contractValue = money(payload.contractValue);
     if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
 
@@ -668,7 +685,7 @@ export async function DELETE(request: Request) {
   if (clean(body.type) !== "vendorProduct" || !id) return Response.json({ error: "Select a valid vendor product" }, { status: 400 });
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.DELETE(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email });
+    return mongodb.DELETE(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email, teamAssignments: [] });
   }
   try {
     await ensureSchema();

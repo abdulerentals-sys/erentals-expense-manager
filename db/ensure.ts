@@ -22,13 +22,16 @@ export function ensureSchema() {
       d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS invoices_invoice_no_unique ON invoices (invoice_no)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS expenses (id text PRIMARY KEY NOT NULL, expense_no text NOT NULL, order_id text NOT NULL, person_id text NOT NULL, vendor_id text DEFAULT '' NOT NULL, category text NOT NULL, vendor text NOT NULL, description text NOT NULL, expense_date text NOT NULL, amount integer NOT NULL, payment_mode text NOT NULL, receipt_key text DEFAULT '' NOT NULL, receipt_name text DEFAULT '' NOT NULL, created_at text NOT NULL)"),
       d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS expenses_expense_no_unique ON expenses (expense_no)"),
-      d1.prepare("CREATE TABLE IF NOT EXISTS payments (id text PRIMARY KEY NOT NULL, order_id text DEFAULT '' NOT NULL, person_id text DEFAULT '' NOT NULL, vendor_id text DEFAULT '' NOT NULL, invoice_id text DEFAULT '' NOT NULL, customer_id text DEFAULT '' NOT NULL, direction text NOT NULL, amount integer NOT NULL, payment_date text NOT NULL, method text NOT NULL, reference text DEFAULT '' NOT NULL, notes text DEFAULT '' NOT NULL, created_at text NOT NULL)"),
+      d1.prepare("CREATE TABLE IF NOT EXISTS payments (id text PRIMARY KEY NOT NULL, order_id text DEFAULT '' NOT NULL, manual_order_id text DEFAULT '' NOT NULL, person_id text DEFAULT '' NOT NULL, vendor_id text DEFAULT '' NOT NULL, invoice_id text DEFAULT '' NOT NULL, customer_id text DEFAULT '' NOT NULL, direction text NOT NULL, amount integer NOT NULL, payment_date text NOT NULL, method text NOT NULL, reference text DEFAULT '' NOT NULL, notes text DEFAULT '' NOT NULL, created_at text NOT NULL)"),
     ]);
 
     const paymentColumns = await d1.prepare("PRAGMA table_info(payments)").all<{ name: string }>();
     const names = new Set((paymentColumns.results ?? []).map((column) => column.name));
     if (!names.has("order_id")) {
       await d1.prepare("ALTER TABLE payments ADD COLUMN order_id text DEFAULT '' NOT NULL").run();
+    }
+    if (!names.has("manual_order_id")) {
+      await d1.prepare("ALTER TABLE payments ADD COLUMN manual_order_id text DEFAULT '' NOT NULL").run();
     }
     if (!names.has("person_id")) {
       await d1.prepare("ALTER TABLE payments ADD COLUMN person_id text DEFAULT '' NOT NULL").run();

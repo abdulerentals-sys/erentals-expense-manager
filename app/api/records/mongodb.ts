@@ -5,10 +5,11 @@ import {
   type Collection,
   type Filter,
 } from "mongodb";
+import { isOrderTeamPerson, type TeamAssignment } from "../../auth/team";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis, type ProductType } from "../../vendor-pricing";
 
 type Payload = Record<string, unknown>;
-type RequestContext = { userRole: string; userPersonId: string; userEmail: string };
+type RequestContext = { userRole: string; userPersonId: string; userEmail: string; teamAssignments: TeamAssignment[] };
 
 type Customer = {
   id: string;
@@ -93,6 +94,7 @@ type Expense = {
 type Payment = {
   id: string;
   orderId: string;
+  manualOrderId: string;
   personId: string;
   vendorId: string;
   invoiceId: string;
@@ -144,11 +146,11 @@ function paymentAllocations(payload: Payload): PaymentAllocation[] {
     try { raw = JSON.parse(raw); } catch { return []; }
   }
   if (Array.isArray(raw)) {
-    return raw.map((item) => ({ orderId: clean((item as Payload).orderId), amount: money((item as Payload).amount) })).filter((item) => item.orderId && item.amount);
+    return raw.map((item) => ({ orderId: clean((item as Payload).orderId), amount: money((item as Payload).amount) })).filter((item) => item.orderId && item.orderId !== "__manual__" && item.amount);
   }
   const orderId = clean(payload.orderId);
   const amount = money(payload.amount);
-  return orderId && amount ? [{ orderId, amount }] : [];
+  return orderId && orderId !== "__manual__" && amount ? [{ orderId, amount }] : [];
 }
 
 let mongoClientPromise: Promise<MongoClient> | null = null;
@@ -169,15 +171,6 @@ function validDate(value: unknown) {
 
 function invalidDate(payload: Payload, fields: string[]) {
   return fields.find((field) => !validDate(payload[field]));
-}
-
-function isSalesperson(person: Person | null): person is Person {
-  return Boolean(person?.role.trim().toLowerCase().includes("sales"));
-}
-
-function isSupervisor(person: Person | null): person is Person {
-  const role = person?.role.trim().toLowerCase() ?? "";
-  return role.includes("supervisor") || role.includes("execution manager");
 }
 
 function getMongoUri() {
@@ -291,6 +284,7 @@ export async function GET() {
     const normalizedPayments = payments.map((payment) => ({
       ...payment,
       orderId: payment.orderId || orderByInvoice.get(payment.invoiceId) || "",
+      manualOrderId: payment.manualOrderId || "",
       personId: payment.personId || "",
       vendorId: payment.vendorId || "",
     }));
@@ -303,7 +297,7 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userEmail: "" }) {
+export async function POST(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userEmail: "", teamAssignments: [] }) {
   try {
     const body = (await request.json()) as { type?: string; payload?: Payload };
     const type = clean(body.type);
@@ -395,9 +389,11 @@ export async function POST(request: Request, context: RequestContext = { userRol
         findById(collections.persons, assignedPersonId),
       ]);
       if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
-      if (!isSalesperson(salesperson)) throw new FormError("Select a valid salesperson from the team");
-      if (!isSupervisor(assignedPerson)) throw new FormError("Select a valid supervisor from the team");
+      if (!salesperson) throw new FormError("Select a valid salesperson from the team");
+      if (!assignedPerson) throw new FormError("Select a valid supervisor from the team");
       if (salesperson.status !== "Active" || assignedPerson.status !== "Active") throw new FormError("Select active team members for the order");
+      if (!isOrderTeamPerson(salesperson, "salesperson", context.teamAssignments)) throw new FormError("Select a valid salesperson from the team");
+      if (!isOrderTeamPerson(assignedPerson, "supervisor", context.teamAssignments)) throw new FormError("Select a valid supervisor from the team");
       const contractValue = money(payload.contractValue);
       if (!contractValue) {
         return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
@@ -598,8 +594,12 @@ export async function POST(request: Request, context: RequestContext = { userRol
       const personId = "";
       const customerId = direction === "Received" ? clean(payload.customerId) : "";
       const vendorId = direction === "Paid" ? clean(payload.vendorId) : "";
+      const rawManualOrderId = clean(payload.manualOrderId);
+      const manualOrderId = direction === "Received" ? rawManualOrderId : "";
       const allocations = paymentAllocations(payload);
-      if (!allocations.length) throw new FormError("Select at least one order and enter its allocation");
+      if (rawManualOrderId && direction !== "Received") throw new FormError("Manual Order ID is only available for customer receipts");
+      if (manualOrderId && allocations.length) throw new FormError("Choose either a listed order or a manual Order ID");
+      if (!manualOrderId && !allocations.length) throw new FormError("Select at least one order or enter a manual Order ID");
       if (new Set(allocations.map((item) => item.orderId)).size !== allocations.length) throw new FormError("Each order can only be selected once");
       if (direction === "Received" && !customerId) {
         throw new FormError("Select the customer");
@@ -609,7 +609,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
       }
       if (customerId && !await findById(collections.customers, customerId)) throw new FormError("Select a valid customer");
       if (vendorId && !await findById(collections.vendors, vendorId)) throw new FormError("Select a valid vendor or payee");
-      if (allocations.reduce((sum, item) => sum + item.amount, 0) !== amount) throw new FormError("Allocation total must equal the payment amount");
+      if (!manualOrderId && allocations.reduce((sum, item) => sum + item.amount, 0) !== amount) throw new FormError("Allocation total must equal the payment amount");
       const linkedOrders = await Promise.all(allocations.map((allocation) => findById(collections.orders, allocation.orderId)));
       if (linkedOrders.some((order) => !order)) throw new FormError("Select valid orders");
       if (direction === "Received" && linkedOrders.some((order) => order!.customerId !== customerId)) throw new FormError("Customer receipts can only use orders belonging to the selected customer");
@@ -617,8 +617,8 @@ export async function POST(request: Request, context: RequestContext = { userRol
         const assignedOrderIds = await collections.orderVendors.distinct("orderId", { orderId: { $in: allocations.map((item) => item.orderId) }, vendorId });
         if (assignedOrderIds.length !== allocations.length) throw new FormError("Vendor is not assigned to every selected order");
       }
-      const rows: Payment[] = allocations.map((allocation, index) => ({
-        id: crypto.randomUUID(), orderId: allocation.orderId, personId, vendorId, invoiceId: "", customerId: direction === "Received" ? customerId : linkedOrders[index]!.customerId, direction, amount: allocation.amount,
+      const rows: Payment[] = (manualOrderId ? [{ orderId: "", amount }] : allocations).map((allocation, index) => ({
+        id: crypto.randomUUID(), orderId: allocation.orderId, manualOrderId, personId, vendorId, invoiceId: "", customerId: direction === "Received" ? customerId : linkedOrders[index]!.customerId, direction, amount: allocation.amount,
         paymentDate: clean(payload.paymentDate), method: clean(payload.method), reference: clean(payload.reference), notes: clean(payload.notes), createdAt,
       }));
       await collections.payments.insertMany(rows);
@@ -637,7 +637,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
   }
 }
 
-export async function PATCH(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userEmail: "" }) {
+export async function PATCH(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userEmail: "", teamAssignments: [] }) {
   try {
     const body = (await request.json()) as { type?: string; id?: string; payload?: Payload };
     const type = clean(body.type);
@@ -685,27 +685,33 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
     }
 
     if (type === "payment") {
-      const missing = required(payload, ["direction", "orderId", "amount", "paymentDate", "method"]);
+      const missing = required(payload, ["direction", "amount", "paymentDate", "method"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       if (invalidDate(payload, ["paymentDate"])) return Response.json({ error: "Enter a valid payment date" }, { status: 400 });
       const direction = clean(payload.direction);
-      const orderId = clean(payload.orderId);
+      if (!["Received", "Paid"].includes(direction)) return Response.json({ error: "Select a valid payment type" }, { status: 400 });
+      const rawManualOrderId = clean(payload.manualOrderId);
+      const manualOrderId = direction === "Received" ? rawManualOrderId : "";
+      const orderId = manualOrderId ? "" : clean(payload.orderId);
       const customerId = direction === "Received" ? clean(payload.customerId) : "";
       const vendorId = direction === "Paid" ? clean(payload.vendorId) : "";
       const amount = money(payload.amount);
+      if (rawManualOrderId && direction !== "Received") throw new FormError("Manual Order ID is only available for customer receipts");
+      if (manualOrderId && clean(payload.orderId) && clean(payload.orderId) !== "__manual__") throw new FormError("Choose either a listed order or a manual Order ID");
+      if (!manualOrderId && (!orderId || orderId === "__manual__")) throw new FormError("Select an order or enter a manual Order ID");
       if (!amount) return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
       const [existingPayment, order, customer, vendor] = await Promise.all([
         findById(collections.payments, id),
-        findById(collections.orders, orderId),
+        orderId ? findById(collections.orders, orderId) : Promise.resolve(null),
         customerId ? findById(collections.customers, customerId) : Promise.resolve(null),
         vendorId ? findById(collections.vendors, vendorId) : Promise.resolve(null),
       ]);
       if (!existingPayment) return Response.json({ error: "Payment not found" }, { status: 404 });
       if (userRole === "sales" && existingPayment.direction !== "Received") return Response.json({ error: "Your role cannot edit this payment" }, { status: 403 });
-      if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
+      if (!manualOrderId && !order) return Response.json({ error: "Select a valid order" }, { status: 400 });
       if (direction === "Received") {
         if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
-        if (order.customerId !== customerId) return Response.json({ error: "Customer receipts can only use orders belonging to the selected customer" }, { status: 400 });
+        if (order && order.customerId !== customerId) return Response.json({ error: "Customer receipts can only use orders belonging to the selected customer" }, { status: 400 });
       } else {
         if (!vendor) return Response.json({ error: "Select a valid vendor or payee" }, { status: 400 });
         const assignment = await collections.orderVendors.findOne({ orderId, vendorId });
@@ -713,9 +719,10 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       }
       const updates = {
         orderId,
+        manualOrderId,
         vendorId,
         invoiceId: "",
-        customerId: direction === "Received" ? customerId : order.customerId,
+        customerId: direction === "Received" ? customerId : order!.customerId,
         direction,
         amount,
         paymentDate: clean(payload.paymentDate),
@@ -752,9 +759,11 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       return Response.json({ record: { ...existingOrder, ...updates, salespersonId: existingOrder.salespersonId, assignedPersonId: existingOrder.assignedPersonId, contractValue: 0 } });
     }
     if (!customer) throw new FormError("Select a valid customer");
-    if (!isSalesperson(salesperson)) throw new FormError("Select a valid salesperson from the team");
-    if (!isSupervisor(assignedPerson)) throw new FormError("Select a valid supervisor from the team");
+    if (!salesperson) throw new FormError("Select a valid salesperson from the team");
+    if (!assignedPerson) throw new FormError("Select a valid supervisor from the team");
     if (salesperson.status !== "Active" || assignedPerson.status !== "Active") throw new FormError("Select active team members for the order");
+    if (!isOrderTeamPerson(salesperson, "salesperson", context.teamAssignments)) throw new FormError("Select a valid salesperson from the team");
+    if (!isOrderTeamPerson(assignedPerson, "supervisor", context.teamAssignments)) throw new FormError("Select a valid supervisor from the team");
     const contractValue = money(payload.contractValue);
     if (!contractValue) throw new FormError("Order value must be greater than zero");
 
@@ -781,7 +790,7 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
   }
 }
 
-export async function DELETE(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userEmail: "" }) {
+export async function DELETE(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userEmail: "", teamAssignments: [] }) {
   try {
     if (!["admin", "accountant"].includes(context.userRole)) return Response.json({ error: "Your role cannot delete vendor products" }, { status: 403 });
     const body = (await request.json()) as { type?: string; id?: string };

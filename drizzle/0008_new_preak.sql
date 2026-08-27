@@ -1,0 +1,1 @@
+ALTER TABLE `payments` ADD `manual_order_id` text DEFAULT '' NOT NULL;
