@@ -499,8 +499,24 @@ export async function PATCH(request: Request) {
   if (user.mustChangePassword) {
     return Response.json({ error: "Change your temporary password before using the dashboard" }, { status: 403 });
   }
-  if (!["admin", "supervisor"].includes(user.role)) {
+
+  let body: { type?: string; id?: string; payload?: Record<string, unknown> };
+  try {
+    body = await request.clone().json() as typeof body;
+  } catch {
+    return Response.json({ error: "Invalid request" }, { status: 400 });
+  }
+  const type = clean(body.type);
+  const id = clean(body.id);
+  const payload = body.payload ?? {};
+  if (!id || !["order", "payment"].includes(type)) {
+    return Response.json({ error: "Select a valid record to edit" }, { status: 400 });
+  }
+  if (type === "order" && !["admin", "supervisor"].includes(user.role)) {
     return Response.json({ error: "Only an administrator or the assigned supervisor can edit orders" }, { status: 403 });
+  }
+  if (type === "payment" && !canRecordPayment(user.role, clean(payload.direction))) {
+    return Response.json({ error: "Your role cannot edit this payment" }, { status: 403 });
   }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
@@ -509,24 +525,57 @@ export async function PATCH(request: Request) {
 
   try {
     await ensureSchema();
-    const body = (await request.json()) as {
-      type?: string;
-      id?: string;
-      payload?: Record<string, unknown>;
-    };
-    const type = clean(body.type);
-    const id = clean(body.id);
-    const payload = body.payload ?? {};
-    if (type !== "order" || !id) {
-      return Response.json({ error: "Select a valid order to edit" }, { status: 400 });
+    const db = getDb();
+
+    if (type === "payment") {
+      const missing = required(payload, ["direction", "orderId", "amount", "paymentDate", "method"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      if (invalidDate(payload, ["paymentDate"])) return Response.json({ error: "Enter a valid payment date" }, { status: 400 });
+      const direction = clean(payload.direction);
+      const orderId = clean(payload.orderId);
+      const customerId = direction === "Received" ? clean(payload.customerId) : "";
+      const vendorId = direction === "Paid" ? clean(payload.vendorId) : "";
+      const amount = money(payload.amount);
+      if (!amount) return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
+      const [[existingPayment], [order], [customer], [vendor]] = await Promise.all([
+        db.select().from(payments).where(eq(payments.id, id)).limit(1),
+        db.select().from(orders).where(eq(orders.id, orderId)).limit(1),
+        customerId ? db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1) : Promise.resolve([]),
+        vendorId ? db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1) : Promise.resolve([]),
+      ]);
+      if (!existingPayment) return Response.json({ error: "Payment not found" }, { status: 404 });
+      if (user.role === "sales" && existingPayment.direction !== "Received") return Response.json({ error: "Your role cannot edit this payment" }, { status: 403 });
+      if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
+      if (direction === "Received") {
+        if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
+        if (order.customerId !== customerId) return Response.json({ error: "Customer receipts can only use orders belonging to the selected customer" }, { status: 400 });
+      } else {
+        if (!vendor) return Response.json({ error: "Select a valid vendor or payee" }, { status: 400 });
+        const [assignment] = await db.select({ id: orderVendors.id }).from(orderVendors).where(and(eq(orderVendors.orderId, orderId), eq(orderVendors.vendorId, vendorId))).limit(1);
+        if (!assignment) return Response.json({ error: "Vendor is not assigned to the selected order" }, { status: 400 });
+      }
+      const updates = {
+        orderId,
+        vendorId,
+        invoiceId: "",
+        customerId: direction === "Received" ? customerId : order.customerId,
+        direction,
+        amount,
+        paymentDate: clean(payload.paymentDate),
+        method: clean(payload.method),
+        reference: clean(payload.reference),
+        notes: clean(payload.notes),
+      };
+      await db.update(payments).set(updates).where(eq(payments.id, id));
+      return Response.json({ record: { ...existingPayment, ...updates } });
     }
+
     const missing = required(payload, user.role === "supervisor" ? ["eventDate"] : ["orderNo", "customerId", "salespersonId", "assignedPersonId", "eventDate"]);
     if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
     if (invalidDate(payload, ["eventDate"])) {
       return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
     }
 
-    const db = getDb();
     const customerId = clean(payload.customerId);
     const salespersonId = clean(payload.salespersonId);
     const assignedPersonId = clean(payload.assignedPersonId);
@@ -571,7 +620,7 @@ export async function PATCH(request: Request) {
     await db.update(orders).set(updates).where(eq(orders.id, id));
     return Response.json({ record: { ...existingOrder, ...updates } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to update order";
+    const message = error instanceof Error ? error.message : "Unable to update record";
     const friendly = message.includes("UNIQUE") ? "That order number already exists" : message;
     return Response.json({ error: friendly }, { status: 500 });
   }

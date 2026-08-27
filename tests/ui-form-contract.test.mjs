@@ -18,13 +18,13 @@ test("every record form is wired and dated transactions persist their dates", as
     readFile(new URL("../app/api/records/mongodb.ts", import.meta.url), "utf8"),
   ]);
 
-  for (const kind of ["customer", "person", "order", "invoice", "expense", "payment"]) {
+  for (const kind of ["customer", "person", "order", "expense", "payment"]) {
     assert.match(dashboard, new RegExp(`kind === "${kind}"`));
     assert.match(sitesRoute, new RegExp(`type === "${kind}"`));
     assert.match(mongoRoute, new RegExp(`type === "${kind}"`));
   }
 
-  for (const field of ["eventDate", "issueDate", "dueDate", "expenseDate", "paymentDate"]) {
+  for (const field of ["eventDate", "expenseDate", "paymentDate"]) {
     assert.match(dashboard, new RegExp(`name="${field}"[^>]*type="date"`));
     assert.match(sitesRoute, new RegExp(`${field}: clean\\(payload\\.${field}\\)`));
     assert.match(mongoRoute, new RegExp(`${field}: clean\\(payload\\.${field}\\)`));
@@ -32,10 +32,8 @@ test("every record form is wired and dated transactions persist their dates", as
 
   for (const route of [sitesRoute, mongoRoute]) {
     assert.match(route, /invalidDate\(payload, \["eventDate"\]\)/);
-    assert.match(route, /invalidDate\(payload, \["issueDate", "dueDate"\]\)/);
     assert.match(route, /invalidDate\(payload, \["expenseDate"\]\)/);
     assert.match(route, /invalidDate\(payload, \["paymentDate"\]\)/);
-    assert.match(route, /Due date cannot be before the invoice date/);
     assert.match(route, /Payment amount must be greater than zero/);
   }
 

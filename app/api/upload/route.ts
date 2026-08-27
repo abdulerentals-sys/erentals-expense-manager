@@ -32,7 +32,7 @@ export async function POST(request: Request) {
   } catch {
     return Response.json({ error: "Invalid upload request" }, { status: 400 });
   }
-  if (!(["invoice", "expense"].includes(kind)) || !canCreateRecord(user.role, kind)) {
+  if (kind !== "expense" || !canCreateRecord(user.role, kind)) {
     return Response.json({ error: "Your role cannot upload this document" }, { status: 403 });
   }
   if (usesNetlifyStorage()) {

@@ -3,7 +3,6 @@ import type { UserRole } from "./types";
 export type DashboardSection =
   | "overview"
   | "customers"
-  | "invoices"
   | "persons"
   | "vendors"
   | "orders"
@@ -13,7 +12,7 @@ export type DashboardSection =
   | "history"
   | "users";
 
-export type RecordType = "customer" | "person" | "vendor" | "vendorProduct" | "order" | "orderVendor" | "invoice" | "expense" | "payment";
+export type RecordType = "customer" | "person" | "vendor" | "vendorProduct" | "order" | "orderVendor" | "expense" | "payment";
 export type PaymentDirection = "Received" | "Paid";
 
 export const roleLabels: Record<UserRole, string> = {
@@ -25,23 +24,23 @@ export const roleLabels: Record<UserRole, string> = {
 
 export const roleDescriptions: Record<UserRole, string> = {
   admin: "Full access, including user administration and every financial record.",
-  accountant: "Customers, invoices, expenses, payments and financial reports.",
+  accountant: "Customers, vendors, order expenses, payments and financial reports.",
   supervisor: "Assigned active orders, order contacts, vendor assignment, own expenses and read-only order history.",
-  sales: "Customers, people, orders, sales invoices and customer receipts.",
+  sales: "Customers, people, orders and customer receipts.",
 };
 
 const sectionsByRole: Record<UserRole, DashboardSection[]> = {
-  admin: ["overview", "customers", "invoices", "persons", "vendors", "orders", "expenses", "payments", "reports", "users"],
-  accountant: ["overview", "customers", "invoices", "vendors", "orders", "expenses", "payments", "reports"],
+  admin: ["overview", "customers", "persons", "vendors", "orders", "expenses", "payments", "reports", "users"],
+  accountant: ["overview", "customers", "vendors", "orders", "expenses", "payments", "reports"],
   supervisor: ["overview", "customers", "persons", "orders", "expenses", "history"],
-  sales: ["overview", "customers", "persons", "orders", "invoices", "payments"],
+  sales: ["overview", "customers", "persons", "orders", "payments"],
 };
 
 const recordsByRole: Record<UserRole, RecordType[]> = {
-  admin: ["customer", "person", "vendor", "vendorProduct", "order", "orderVendor", "invoice", "expense", "payment"],
-  accountant: ["customer", "vendor", "vendorProduct", "orderVendor", "invoice", "expense", "payment"],
+  admin: ["customer", "person", "vendor", "vendorProduct", "order", "orderVendor", "expense", "payment"],
+  accountant: ["customer", "vendor", "vendorProduct", "orderVendor", "expense", "payment"],
   supervisor: ["person", "orderVendor", "expense"],
-  sales: ["customer", "person", "order", "invoice", "payment"],
+  sales: ["customer", "person", "order", "payment"],
 };
 
 export function canViewSection(role: UserRole, section: string): section is DashboardSection {
@@ -92,7 +91,6 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
       historyOrders: ownOrders.map(sanitizeOrder),
       orderVendors: orderVendors.filter((assignment) => activeOrderIds.has(String(assignment.orderId ?? ""))).map((assignment) => ({ ...assignment, amount: 0, unitRate: 0 })),
       expenses: expenses.filter((expense) => activeOrderIds.has(String(expense.orderId ?? "")) && supervisorPersonIds.has(String(expense.personId ?? ""))),
-      invoices: [],
       payments: [],
       supervisorLinked: supervisorPersonIds.size > 0,
       supervisorOrderIds: [...allOrderIds],

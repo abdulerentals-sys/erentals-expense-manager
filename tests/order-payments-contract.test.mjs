@@ -42,7 +42,8 @@ test("each order exposes a combined transaction history", async () => {
   assert.match(dashboard, /Customer receipt/);
   assert.match(dashboard, /Vendor payment/);
   assert.match(dashboard, /Order expense/);
-  assert.match(dashboard, /Invoice issued/);
+  assert.match(dashboard, /Vendor assigned/);
+  assert.doesNotMatch(dashboard, /Invoice issued/);
 });
 
 test("accountants can allocate one payment across multiple orders", async () => {

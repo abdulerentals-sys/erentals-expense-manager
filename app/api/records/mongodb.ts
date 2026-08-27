@@ -636,23 +636,77 @@ export async function POST(request: Request, context: RequestContext = { userRol
 
 export async function PATCH(request: Request, context: RequestContext = { userRole: "admin", userEmail: "" }) {
   try {
-    if (!["admin", "supervisor"].includes(context.userRole)) throw new FormError("Only an administrator or the assigned supervisor can edit orders");
     const body = (await request.json()) as { type?: string; id?: string; payload?: Payload };
     const type = clean(body.type);
     const id = clean(body.id);
     const payload = body.payload ?? {};
-    if (type !== "order" || !id) {
-      return Response.json({ error: "Select a valid order to edit" }, { status: 400 });
+    if (!id || !["order", "payment"].includes(type)) {
+      return Response.json({ error: "Select a valid record to edit" }, { status: 400 });
     }
     const userRole = context.userRole;
     const userEmail = context.userEmail;
+    if (type === "order" && !["admin", "supervisor"].includes(userRole)) {
+      return Response.json({ error: "Only an administrator or the assigned supervisor can edit orders" }, { status: 403 });
+    }
+    const requestedDirection = clean(payload.direction);
+    const canEditPayment = requestedDirection === "Received"
+      ? ["admin", "accountant", "sales"].includes(userRole)
+      : requestedDirection === "Paid" && ["admin", "accountant"].includes(userRole);
+    if (type === "payment" && !canEditPayment) {
+      return Response.json({ error: "Your role cannot edit this payment" }, { status: 403 });
+    }
+
+    const { collections } = await getMongoDatabase();
+
+    if (type === "payment") {
+      const missing = required(payload, ["direction", "orderId", "amount", "paymentDate", "method"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      if (invalidDate(payload, ["paymentDate"])) return Response.json({ error: "Enter a valid payment date" }, { status: 400 });
+      const direction = clean(payload.direction);
+      const orderId = clean(payload.orderId);
+      const customerId = direction === "Received" ? clean(payload.customerId) : "";
+      const vendorId = direction === "Paid" ? clean(payload.vendorId) : "";
+      const amount = money(payload.amount);
+      if (!amount) return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
+      const [existingPayment, order, customer, vendor] = await Promise.all([
+        findById(collections.payments, id),
+        findById(collections.orders, orderId),
+        customerId ? findById(collections.customers, customerId) : Promise.resolve(null),
+        vendorId ? findById(collections.vendors, vendorId) : Promise.resolve(null),
+      ]);
+      if (!existingPayment) return Response.json({ error: "Payment not found" }, { status: 404 });
+      if (userRole === "sales" && existingPayment.direction !== "Received") return Response.json({ error: "Your role cannot edit this payment" }, { status: 403 });
+      if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
+      if (direction === "Received") {
+        if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
+        if (order.customerId !== customerId) return Response.json({ error: "Customer receipts can only use orders belonging to the selected customer" }, { status: 400 });
+      } else {
+        if (!vendor) return Response.json({ error: "Select a valid vendor or payee" }, { status: 400 });
+        const assignment = await collections.orderVendors.findOne({ orderId, vendorId });
+        if (!assignment) return Response.json({ error: "Vendor is not assigned to the selected order" }, { status: 400 });
+      }
+      const updates = {
+        orderId,
+        vendorId,
+        invoiceId: "",
+        customerId: direction === "Received" ? customerId : order.customerId,
+        direction,
+        amount,
+        paymentDate: clean(payload.paymentDate),
+        method: clean(payload.method),
+        reference: clean(payload.reference),
+        notes: clean(payload.notes),
+      };
+      await collections.payments.updateOne({ id }, { $set: updates });
+      return Response.json({ record: { ...existingPayment, ...updates } });
+    }
+
     const missing = required(payload, userRole === "supervisor" ? ["eventDate"] : ["orderNo", "customerId", "salespersonId", "assignedPersonId", "eventDate"]);
     if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
     if (invalidDate(payload, ["eventDate"])) {
       return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
     }
 
-    const { collections } = await getMongoDatabase();
     const customerId = clean(payload.customerId);
     const salespersonId = clean(payload.salespersonId);
     const assignedPersonId = clean(payload.assignedPersonId);
@@ -697,7 +751,7 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
     await collections.orders.updateOne({ id }, { $set: updates });
     return Response.json({ record: { ...existingOrder, ...updates } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to update order";
+    const message = error instanceof Error ? error.message : "Unable to update record";
     const friendly =
       error instanceof MongoServerError && error.code === 11000
         ? "That order number already exists"
