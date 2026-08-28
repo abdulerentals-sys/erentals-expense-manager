@@ -87,9 +87,9 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
     const expenses = Array.isArray(data.expenses) ? data.expenses as Array<Record<string, unknown>> : [];
     return {
       ...data,
-      customers: customers.filter((customer) => activeCustomerIds.has(String(customer.id ?? ""))),
+      customers: customers.filter((customer) => activeCustomerIds.has(String(customer.id ?? ""))).map((customer) => ({ ...customer, openingBalance: 0 })),
       historyCustomers: customers.filter((customer) => allCustomerIds.has(String(customer.id ?? ""))).map((customer) => ({ id: customer.id, name: customer.name, businessName: customer.businessName })),
-      persons: people.filter((person) => supervisorPersonIds.has(String(person.id ?? "")) || activeOrderIds.has(String(person.orderId ?? ""))),
+      persons: people.filter((person) => supervisorPersonIds.has(String(person.id ?? "")) || activeOrderIds.has(String(person.orderId ?? ""))).map((person) => ({ ...person, paymentMode: "" })),
       vendors: vendors.map((vendor) => ({ id: vendor.id, name: vendor.name, contactPerson: "", phone: "", email: "", gstin: "", address: "", paymentMode: "", status: vendor.status, createdAt: vendor.createdAt })),
       vendorProducts: vendorProducts.map((product) => ({ ...product, rentalCharge: 0 })),
       orders: activeOrders.map(sanitizeOrder),
