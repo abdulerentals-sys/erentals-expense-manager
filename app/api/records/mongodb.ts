@@ -381,7 +381,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
     const createdAt = now();
 
     if (type === "customer") {
-      const missing = required(payload, ["name", "businessName", "phone"]);
+      const missing = required(payload, ["name", "phone"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       const row: Customer = {
         id: crypto.randomUUID(),
