@@ -3,6 +3,7 @@ import { canCreateRecord, canRecordPayment, filterRecordData } from "../../auth/
 import { getSessionUser } from "../../auth/session";
 import { listUsers } from "../../auth/store";
 import { isOrderTeamPerson, type TeamAssignment } from "../../auth/team";
+import { isAllowedExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis } from "../../vendor-pricing";
 import { getDb } from "../../../db";
 import { ensureSchema } from "../../../db/ensure";
@@ -10,6 +11,7 @@ import {
   customers,
   expenses,
   invoices,
+  orderProducts,
   orderVendors,
   orders,
   payments,
@@ -24,7 +26,20 @@ const money = (value: unknown) => Math.max(0, Math.round(Number(value) || 0));
 const positiveInteger = (value: unknown) => Math.max(1, Math.round(Number(value) || 1));
 
 type PaymentAllocation = { orderId: string; amount: number };
+type OrderProductInput = { name: string; quantity: number; price: number };
 type VendorAssignmentInput = { vendorId: string; productName: string; amount: number; notes: string };
+
+function orderProductInputs(payload: Record<string, unknown>): OrderProductInput[] {
+  let raw: unknown = payload.products;
+  if (typeof raw === "string" && raw.trim()) {
+    try { raw = JSON.parse(raw); } catch { return []; }
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    const row = item as Record<string, unknown>;
+    return { name: clean(row.name), quantity: money(row.quantity), price: money(row.price) };
+  }).filter((item) => item.name || item.quantity || item.price);
+}
 
 function vendorAssignments(payload: Record<string, unknown>): VendorAssignmentInput[] {
   let raw: unknown = payload.vendorAssignments;
@@ -124,13 +139,14 @@ export async function GET() {
   try {
     await ensureSchema();
     const db = getDb();
-    const [customerRows, personRows, vendorRows, vendorProductRows, orderRows, orderVendorRows, invoiceRows, expenseRows, paymentRows, assignmentRows] =
+    const [customerRows, personRows, vendorRows, vendorProductRows, orderRows, orderProductRows, orderVendorRows, invoiceRows, expenseRows, paymentRows, assignmentRows] =
       await Promise.all([
         db.select().from(customers).orderBy(desc(customers.createdAt)),
         db.select().from(persons).orderBy(desc(persons.createdAt)),
         db.select().from(vendors).orderBy(desc(vendors.createdAt)),
         db.select().from(vendorProducts).where(ne(vendorProducts.status, "Deleted")).orderBy(desc(vendorProducts.createdAt)),
         db.select().from(orders).orderBy(desc(orders.createdAt)),
+        db.select().from(orderProducts).orderBy(desc(orderProducts.createdAt)),
         db.select().from(orderVendors).orderBy(desc(orderVendors.createdAt)),
         db.select().from(invoices).orderBy(desc(invoices.createdAt)),
         db.select().from(expenses).orderBy(desc(expenses.createdAt)),
@@ -158,6 +174,7 @@ export async function GET() {
       vendors: vendorRows,
       vendorProducts: vendorProductRows,
       orders: normalizedOrders,
+      orderProducts: orderProductRows,
       orderVendors: orderVendorRows,
       invoices: invoiceRows,
       expenses: expenseRows,
@@ -316,6 +333,11 @@ export async function POST(request: Request) {
       if (advancePayment && (invalidDate(payload, ["advancePaymentDate"]) || !clean(payload.advancePaymentMethod))) {
         return Response.json({ error: "Enter the advance payment date and method" }, { status: 400 });
       }
+      const products = orderProductInputs(payload);
+      if (products.some((item) => !item.name || !item.quantity || !item.price)) {
+        return Response.json({ error: "Complete the product name, quantity and price for every product" }, { status: 400 });
+      }
+      const firstProduct = products[0];
       const row = {
         id: crypto.randomUUID(),
         orderNo: clean(payload.orderNo) || `ORD-${Date.now().toString().slice(-6)}`,
@@ -334,8 +356,8 @@ export async function POST(request: Request) {
         pickupFromGodown,
         contactPerson: clean(payload.contactPerson),
         contactPhone: clean(payload.contactPhone),
-        productName: clean(payload.productName),
-        productPrice: money(payload.productPrice),
+        productName: firstProduct?.name ?? "",
+        productPrice: firstProduct?.price ?? 0,
         attachmentKey: clean(payload.attachmentKey),
         attachmentName: clean(payload.attachmentName),
         attachmentType: clean(payload.attachmentType),
@@ -351,6 +373,7 @@ export async function POST(request: Request) {
         return vendor;
       }));
       if (validVendors.some((vendor) => !vendor)) return Response.json({ error: "Select valid vendors for the order" }, { status: 400 });
+      const productRows = products.map((product) => ({ id: crypto.randomUUID(), orderId: row.id, ...product, amount: product.quantity * product.price, createdAt }));
       const assignmentRows = assignments.map((assignment) => ({ id: crypto.randomUUID(), orderId: row.id, ...assignment, createdAt }));
       const advanceRow = advancePayment ? {
         id: crypto.randomUUID(),
@@ -368,7 +391,15 @@ export async function POST(request: Request) {
         notes: clean(payload.advanceNotes) || "Advance payment received during order creation",
         createdAt,
       } : null;
-      if (assignmentRows.length && advanceRow) {
+      if (productRows.length && assignmentRows.length && advanceRow) {
+        await db.batch([db.insert(orders).values(row), db.insert(orderProducts).values(productRows), db.insert(orderVendors).values(assignmentRows), db.insert(payments).values(advanceRow)]);
+      } else if (productRows.length && assignmentRows.length) {
+        await db.batch([db.insert(orders).values(row), db.insert(orderProducts).values(productRows), db.insert(orderVendors).values(assignmentRows)]);
+      } else if (productRows.length && advanceRow) {
+        await db.batch([db.insert(orders).values(row), db.insert(orderProducts).values(productRows), db.insert(payments).values(advanceRow)]);
+      } else if (productRows.length) {
+        await db.batch([db.insert(orders).values(row), db.insert(orderProducts).values(productRows)]);
+      } else if (assignmentRows.length && advanceRow) {
         await db.batch([db.insert(orders).values(row), db.insert(orderVendors).values(assignmentRows), db.insert(payments).values(advanceRow)]);
       } else if (assignmentRows.length) {
         await db.batch([db.insert(orders).values(row), db.insert(orderVendors).values(assignmentRows)]);
@@ -480,24 +511,32 @@ export async function POST(request: Request) {
         return Response.json({ error: "Enter a valid expense date" }, { status: 400 });
       }
       const orderId = clean(payload.orderId);
+      const category = clean(payload.category);
+      if (!isAllowedExpenseCategory(category)) {
+        return Response.json({ error: "Select a valid expense category" }, { status: 400 });
+      }
       let personId = clean(payload.personId);
       if (user.role === "supervisor") {
         const supervisorPerson = await findSupervisorPerson(db, user.personId, user.email);
         if (!supervisorPerson) return Response.json({ error: "Supervisor profile is not linked to a Person record" }, { status: 400 });
+        if (personId && personId !== supervisorPerson.id) {
+          return Response.json({ error: "Supervisor expenses are assigned to your linked Person record" }, { status: 400 });
+        }
+        if (clean(payload.vendorId) || clean(payload.vendor)) {
+          return Response.json({ error: "Vendor or payee cannot be recorded on an expense" }, { status: 400 });
+        }
         const [ownedOrder] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.id, orderId), eq(orders.assignedPersonId, supervisorPerson.id), ne(orders.status, "Completed"), ne(orders.status, "Cancelled"))).limit(1);
         if (!ownedOrder) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
         personId = supervisorPerson.id;
       }
-      const vendorId = clean(payload.vendorId);
       const [[order], [person]] = await Promise.all([
-        db.select({ id: orders.id }).from(orders).where(eq(orders.id, orderId)).limit(1),
-        db.select({ id: persons.id }).from(persons).where(eq(persons.id, personId)).limit(1),
+        db.select({ id: orders.id, assignedPersonId: orders.assignedPersonId }).from(orders).where(eq(orders.id, orderId)).limit(1),
+        db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, personId)).limit(1),
       ]);
       if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
       if (!person) return Response.json({ error: "Select a valid responsible person" }, { status: 400 });
-      if (vendorId) {
-        const [vendor] = await db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1);
-        if (!vendor) return Response.json({ error: "Select a valid vendor" }, { status: 400 });
+      if (user.role !== "supervisor" && !isExpenseResponsiblePerson(person, order)) {
+        return Response.json({ error: "Responsible person must be an active salesperson, this order's assigned supervisor, or an active manager" }, { status: 400 });
       }
       const amount = money(payload.amount);
       if (!amount) return Response.json({ error: "Expense amount must be greater than zero" }, { status: 400 });
@@ -506,9 +545,9 @@ export async function POST(request: Request) {
         expenseNo: clean(payload.expenseNo) || `EXP-${Date.now().toString().slice(-6)}`,
         orderId,
         personId,
-        category: clean(payload.category),
-        vendor: clean(payload.vendor),
-        vendorId,
+        category,
+        vendor: "",
+        vendorId: "",
         description: clean(payload.description),
         expenseDate: clean(payload.expenseDate),
         amount,
@@ -745,6 +784,11 @@ export async function PATCH(request: Request) {
     if (!isOrderTeamPerson(assignedPerson, "supervisor", assignmentsForTeam)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
     const contractValue = money(payload.contractValue);
     if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
+    const products = orderProductInputs(payload);
+    if (products.some((item) => !item.name || !item.quantity || !item.price)) {
+      return Response.json({ error: "Complete the product name, quantity and price for every product" }, { status: 400 });
+    }
+    const firstProduct = products[0];
 
     const updates = {
       orderNo: clean(payload.orderNo),
@@ -763,15 +807,20 @@ export async function PATCH(request: Request) {
       pickupFromGodown,
       contactPerson: clean(payload.contactPerson),
       contactPhone: clean(payload.contactPhone),
-      productName: clean(payload.productName),
-      productPrice: money(payload.productPrice),
+      productName: firstProduct?.name ?? "",
+      productPrice: firstProduct?.price ?? 0,
       attachmentKey: clean(payload.attachmentKey) || existingOrder.attachmentKey,
       attachmentName: clean(payload.attachmentName) || existingOrder.attachmentName,
       attachmentType: clean(payload.attachmentType) || existingOrder.attachmentType,
       status: clean(payload.status) || "Planned",
       contractValue,
     };
-    await db.update(orders).set(updates).where(eq(orders.id, id));
+    const productRows = products.map((product) => ({ id: crypto.randomUUID(), orderId: id, ...product, amount: product.quantity * product.price, createdAt: now() }));
+    if (productRows.length) {
+      await db.batch([db.update(orders).set(updates).where(eq(orders.id, id)), db.delete(orderProducts).where(eq(orderProducts.orderId, id)), db.insert(orderProducts).values(productRows)]);
+    } else {
+      await db.batch([db.update(orders).set(updates).where(eq(orders.id, id)), db.delete(orderProducts).where(eq(orderProducts.orderId, id))]);
+    }
     return Response.json({ record: { ...existingOrder, ...updates } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update record";

@@ -89,6 +89,16 @@ export const orders = sqliteTable("orders", {
   createdAt: text("created_at").notNull(),
 });
 
+export const orderProducts = sqliteTable("order_products", {
+  id: text("id").primaryKey(),
+  orderId: text("order_id").notNull(),
+  name: text("name").notNull(),
+  quantity: integer("quantity").notNull(),
+  price: integer("price").notNull(),
+  amount: integer("amount").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
 export const orderVendors = sqliteTable("order_vendors", {
   id: text("id").primaryKey(),
   orderId: text("order_id").notNull(),

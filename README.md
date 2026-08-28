@@ -24,7 +24,7 @@ and a standard Next.js deployment on Netlify.
    `ADMIN_EMAIL` and a strong temporary `ADMIN_INITIAL_PASSWORD` for the first
    administrator. Store all three as private Netlify environment variables.
 6. Start the first deployment. The app creates the `users`, `customers`, `persons`,
-   `vendors`, `vendor_products`, `orders`, `order_vendors`, `expenses`, and `payments` collections and their
+   `vendors`, `vendor_products`, `orders`, `order_products`, `order_vendors`, `expenses`, and `payments` collections and their
    indexes automatically on the first request.
 7. Sign in with `ADMIN_EMAIL` and `ADMIN_INITIAL_PASSWORD`. The app immediately
    requires the administrator to choose a private replacement password.

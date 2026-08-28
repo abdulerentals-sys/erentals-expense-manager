@@ -80,6 +80,7 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
     const allCustomerIds = new Set(ownOrders.map((order) => String(order.customerId ?? "")));
     const sanitizeOrder = (order: Record<string, unknown>) => ({ ...order, contractValue: 0, productPrice: 0, attachmentKey: "", attachmentName: "", attachmentType: "" });
     const customers = Array.isArray(data.customers) ? data.customers as Array<Record<string, unknown>> : [];
+    const orderProducts = Array.isArray(data.orderProducts) ? data.orderProducts as Array<Record<string, unknown>> : [];
     const orderVendors = Array.isArray(data.orderVendors) ? data.orderVendors as Array<Record<string, unknown>> : [];
     const vendorProducts = Array.isArray(data.vendorProducts) ? data.vendorProducts as Array<Record<string, unknown>> : [];
     const vendors = Array.isArray(data.vendors) ? data.vendors as Array<Record<string, unknown>> : [];
@@ -93,7 +94,9 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
       vendorProducts: vendorProducts.map((product) => ({ ...product, rentalCharge: 0 })),
       orders: activeOrders.map(sanitizeOrder),
       historyOrders: ownOrders.map(sanitizeOrder),
+      orderProducts: orderProducts.filter((product) => activeOrderIds.has(String(product.orderId ?? ""))).map((product) => ({ ...product, price: 0, amount: 0 })),
       orderVendors: orderVendors.filter((assignment) => activeOrderIds.has(String(assignment.orderId ?? ""))).map((assignment) => ({ ...assignment, amount: 0, unitRate: 0 })),
+      invoices: [],
       expenses: expenses.filter((expense) => activeOrderIds.has(String(expense.orderId ?? "")) && supervisorPersonIds.has(String(expense.personId ?? ""))),
       payments: [],
       supervisorLinked: supervisorPersonIds.size > 0,

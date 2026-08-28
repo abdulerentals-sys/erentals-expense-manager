@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { canCreateRecord, canRecordPayment, canViewSection, roleLabels } from "../auth/permissions";
 import { isOrderTeamPerson, type TeamAssignment } from "../auth/team";
 import type { PublicUser } from "../auth/types";
+import { EXPENSE_CATEGORIES, isExpenseResponsiblePerson } from "../expense-rules";
 import { calculateTentativeCost, isProductType, measurementLabel, productTypes, type PricingBasis, type ProductType } from "../vendor-pricing";
 
 type Customer = { id: string; name: string; businessName: string; phone: string; email: string; gstin: string; address: string; openingBalance: number; createdAt: string };
@@ -14,14 +15,16 @@ type Person = { id: string; name: string; role: string; phone: string; email: st
 type Vendor = { id: string; name: string; contactPerson: string; phone: string; email: string; gstin: string; address: string; paymentMode: string; status: string; createdAt: string };
 type VendorProduct = { id: string; vendorId: string; name: string; productType: ProductType; pricingBasis: PricingBasis; rentalCharge: number; status: string; createdAt: string };
 type Order = { id: string; orderNo: string; title: string; customerId: string; salespersonId: string; assignedPersonId: string; venue: string; eventDate: string; deliveryAddress: string; deliveryDate: string; deliveryTime: string; pickupDate: string; pickupTime: string; pickupAddress: string; pickupFromGodown: boolean; contactPerson: string; contactPhone: string; productName: string; productPrice: number; attachmentKey: string; attachmentName: string; attachmentType: string; status: string; contractValue: number; createdAt: string };
+type OrderProduct = { id: string; orderId: string; name: string; quantity: number; price: number; amount: number; createdAt: string };
+type OrderProductDraft = { key: string; name: string; quantity: number; price: number };
 type OrderVendor = { id: string; orderId: string; vendorId: string; productId: string; productName: string; productType: ProductType; pricingBasis: PricingBasis; unitRate: number; quantity: number; measurement: number; rentalDays: number; amount: number; notes: string; createdAt: string };
 type OrderVendorDraft = { key: string; vendorId: string; productName: string; amount: number; notes: string };
 type Expense = { id: string; expenseNo: string; orderId: string; personId: string; vendorId: string; category: string; vendor: string; description: string; expenseDate: string; amount: number; paymentMode: string; receiptKey: string; receiptName: string; createdAt: string };
 type Payment = { id: string; orderId: string; manualOrderId: string; personId: string; vendorId: string; customerId: string; direction: string; amount: number; paymentDate: string; method: string; reference: string; notes: string; createdAt: string };
-type AppData = { customers: Customer[]; historyCustomers: Customer[]; persons: Person[]; teamAssignments: TeamAssignment[]; vendors: Vendor[]; vendorProducts: VendorProduct[]; orders: Order[]; historyOrders: Order[]; orderVendors: OrderVendor[]; expenses: Expense[]; payments: Payment[]; supervisorLinked?: boolean };
+type AppData = { customers: Customer[]; historyCustomers: Customer[]; persons: Person[]; teamAssignments: TeamAssignment[]; vendors: Vendor[]; vendorProducts: VendorProduct[]; orders: Order[]; historyOrders: Order[]; orderProducts: OrderProduct[]; orderVendors: OrderVendor[]; expenses: Expense[]; payments: Payment[]; supervisorLinked?: boolean };
 type ModalKind = "customer" | "person" | "vendor" | "vendorProduct" | "order" | "orderVendor" | "expense" | "payment" | null;
 
-const emptyData: AppData = { customers: [], historyCustomers: [], persons: [], teamAssignments: [], vendors: [], vendorProducts: [], orders: [], historyOrders: [], orderVendors: [], expenses: [], payments: [] };
+const emptyData: AppData = { customers: [], historyCustomers: [], persons: [], teamAssignments: [], vendors: [], vendorProducts: [], orders: [], historyOrders: [], orderProducts: [], orderVendors: [], expenses: [], payments: [] };
 const navItems = [
   { key: "overview", label: "Overview", icon: "⌂", href: "/" },
   { key: "customers", label: "Customers", icon: "◎", href: "/customers" },
@@ -238,7 +241,7 @@ export default function ExpenseDashboard({ initialSection, user }: { initialSect
         {initialSection === "persons" && <PersonsPage persons={data.persons} orders={data.orders} expenses={data.expenses} openModal={openModal} user={user} />}
         {initialSection === "vendors" && <VendorsPage vendors={data.vendors} vendorProducts={data.vendorProducts} orderVendors={data.orderVendors} payments={data.payments} expenses={data.expenses} openModal={openModal} viewVendor={setSelectedVendor} />}
         {initialSection === "orders" && <OrdersPage data={data} openModal={openModal} customerById={customerById} personById={personById} vendorById={vendorById} user={user} editOrder={editOrder} viewTransactions={setSelectedOrder} />}
-        {initialSection === "expenses" && <ExpensesPage expenses={data.expenses} orderById={orderById} personById={personById} vendorById={vendorById} openModal={openModal} exportExpenses={exportExpenses} />}
+        {initialSection === "expenses" && <ExpensesPage data={data} user={user} openModal={openModal} />}
         {initialSection === "payments" && <PaymentsPage payments={data.payments} customerById={customerById} orderById={orderById} vendorById={vendorById} openModal={openModal} editPayment={editPayment} />}
         {initialSection === "reports" && <ReportsPage data={data} totals={totals} exportExpenses={exportExpenses} />}
         {initialSection === "history" && <SupervisorHistoryPage orders={data.historyOrders} customers={data.historyCustomers} />}
@@ -325,19 +328,196 @@ function OrdersPage({ data, openModal, customerById, personById, vendorById, use
     const orderExpenses = data.expenses.filter((item) => item.orderId === order.id);
     const orderPayments = data.payments.filter((item) => item.orderId === order.id);
     const received = orderPayments.filter((item) => item.direction === "Received").reduce((sum, item) => sum + item.amount, 0);
-    const remaining = Math.max(0, order.contractValue - received);
-    const assignments = data.orderVendors.filter((item) => item.orderId === order.id);
+	    const remaining = Math.max(0, order.contractValue - received);
+	    const savedProducts = data.orderProducts.filter((item) => item.orderId === order.id);
+	    const products = savedProducts.length ? savedProducts : order.productName ? [{ id: `legacy-${order.id}`, orderId: order.id, name: order.productName, quantity: 1, price: order.productPrice, amount: order.productPrice, createdAt: order.createdAt }] : [];
+	    const assignments = data.orderVendors.filter((item) => item.orderId === order.id);
     const cost = orderExpenses.reduce((sum, item) => sum + item.amount, 0);
     const margin = order.contractValue - cost;
     const progress = Math.min(100, order.contractValue ? (cost / order.contractValue) * 100 : 0);
     const transactionCount = orderExpenses.length + orderPayments.length + assignments.length;
-    return <article className="order-card" key={order.id}><div className="order-top"><span className="order-no">{order.orderNo}</span><Status value={order.status} /></div><h3>{orderDisplayTitle(order)}</h3><p>{customerById(order.customerId)?.businessName || "Customer"}</p><div className="order-meta"><span>⌖ {order.deliveryAddress || order.venue || (order.pickupFromGodown ? "Godown pickup" : "Address not added")}</span><span>↓ {shortDate(order.deliveryDate || order.eventDate)} {order.deliveryTime || ""}</span><span>↑ {shortDate(order.pickupDate)} {order.pickupTime || ""}</span>{order.contactPerson && <span>☎ {order.contactPerson} · {order.contactPhone}</span>}</div>{order.productName && <div className="order-product-line"><span>{order.productName}</span>{user.role !== "supervisor" && <strong>{fmt(order.productPrice)}</strong>}</div>}{order.attachmentKey && user.role !== "supervisor" && <a className="file-link" href={`/api/upload?key=${encodeURIComponent(order.attachmentKey)}`} target="_blank" rel="noreferrer">▤ {order.attachmentName || "Order document"}</a>}<div className="assigned-person"><span className="avatar tiny">{initials(personById(order.assignedPersonId)?.name || "NA")}</span><div><small>Supervisor</small><strong>{personById(order.assignedPersonId)?.name || "Unassigned"}</strong></div></div>{user.role !== "supervisor" && <div className="assigned-person"><span className="avatar tiny">{initials(personById(order.salespersonId)?.name || "NA")}</span><div><small>Salesperson</small><strong>{personById(order.salespersonId)?.name || "Unassigned"}</strong></div></div>}{assignments.length > 0 && <div className="vendor-assignments"><small>Assigned vendors</small>{assignments.map((assignment) => <div key={assignment.id}><span>{vendorById(assignment.vendorId)?.name || "Vendor"} · {assignment.productName}</span><strong>{user.role === "supervisor" ? "Item price hidden" : fmt(assignment.amount)}</strong></div>)}</div>}{user.role !== "supervisor" && <><div className="budget-line"><span>Execution cost</span><span>{fmt(cost)} of {fmt(order.contractValue)}</span></div><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><div className="order-values"><div><span>Order value</span><strong>{fmt(order.contractValue)}</strong></div><div><span>Received</span><strong className="positive">{fmt(received)}</strong></div><div><span>Remaining payment</span><strong className={remaining ? "negative" : "positive"}>{fmt(remaining)}</strong></div><div><span>Gross margin</span><strong className={margin >= 0 ? "positive" : "negative"}>{fmt(margin)}</strong></div></div></>}<div className="order-actions"><button type="button" className="text-btn" onClick={() => viewTransactions(order)}>View {transactionCount} record{transactionCount === 1 ? "" : "s"} →</button>{["admin", "supervisor"].includes(user.role) && <button type="button" className="btn btn-secondary btn-small" onClick={() => editOrder(order)}>Edit order</button>}</div></article>;
+	    return <article className="order-card" key={order.id}><div className="order-top"><span className="order-no">{order.orderNo}</span><Status value={order.status} /></div><h3>{orderDisplayTitle(order)}</h3><p>{customerById(order.customerId)?.businessName || "Customer"}</p><div className="order-meta"><span>⌖ {order.deliveryAddress || order.venue || (order.pickupFromGodown ? "Godown pickup" : "Address not added")}</span><span>↓ {shortDate(order.deliveryDate || order.eventDate)} {order.deliveryTime || ""}</span><span>↑ {shortDate(order.pickupDate)} {order.pickupTime || ""}</span>{order.contactPerson && <span>☎ {order.contactPerson} · {order.contactPhone}</span>}</div>{products.length > 0 && <div className="order-product-list"><small>Order products</small>{products.map((product) => <div className="order-product-line" key={product.id}><span>{product.name} · Qty {product.quantity}</span><strong>{user.role === "supervisor" ? "Price hidden" : `${fmt(product.price)} each · ${fmt(product.amount)}`}</strong></div>)}</div>}{order.attachmentKey && user.role !== "supervisor" && <a className="file-link" href={`/api/upload?key=${encodeURIComponent(order.attachmentKey)}`} target="_blank" rel="noreferrer">▤ {order.attachmentName || "Order document"}</a>}<div className="assigned-person"><span className="avatar tiny">{initials(personById(order.assignedPersonId)?.name || "NA")}</span><div><small>Supervisor</small><strong>{personById(order.assignedPersonId)?.name || "Unassigned"}</strong></div></div>{user.role !== "supervisor" && <div className="assigned-person"><span className="avatar tiny">{initials(personById(order.salespersonId)?.name || "NA")}</span><div><small>Salesperson</small><strong>{personById(order.salespersonId)?.name || "Unassigned"}</strong></div></div>}{assignments.length > 0 && <div className="vendor-assignments"><small>Assigned vendors</small>{assignments.map((assignment) => <div key={assignment.id}><span>{vendorById(assignment.vendorId)?.name || "Vendor"} · {assignment.productName}</span><strong>{user.role === "supervisor" ? "Item price hidden" : fmt(assignment.amount)}</strong></div>)}</div>}{user.role !== "supervisor" && <><div className="budget-line"><span>Execution cost</span><span>{fmt(cost)} of {fmt(order.contractValue)}</span></div><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><div className="order-values"><div><span>Order value</span><strong>{fmt(order.contractValue)}</strong></div><div><span>Received</span><strong className="positive">{fmt(received)}</strong></div><div><span>Remaining payment</span><strong className={remaining ? "negative" : "positive"}>{fmt(remaining)}</strong></div><div><span>Gross margin</span><strong className={margin >= 0 ? "positive" : "negative"}>{fmt(margin)}</strong></div></div></>}<div className="order-actions"><button type="button" className="text-btn" onClick={() => viewTransactions(order)}>View {transactionCount} record{transactionCount === 1 ? "" : "s"} →</button>{["admin", "supervisor"].includes(user.role) && <button type="button" className="btn btn-secondary btn-small" onClick={() => editOrder(order)}>Edit order</button>}</div></article>;
   })}</div> : <EmptyState title="Create your first order" copy="An order connects the customer, execution lead, vendors, payments and expenses." action="Create order" onClick={() => openModal("order")} />}</div>;
 }
 
-function ExpensesPage({ expenses, orderById, personById, vendorById, openModal, exportExpenses }: { expenses: Expense[]; orderById: (id: string) => Order | undefined; personById: (id: string) => Person | undefined; vendorById: (id: string) => Vendor | undefined; openModal: (kind: Exclude<ModalKind, null>) => void; exportExpenses: () => void }) {
-  void vendorById;
-  return <div className="section-stack"><PageHead copy={`${expenses.length} expenses · ${fmt(expenses.reduce((sum, item) => sum + item.amount, 0))} total execution cost.`} action={<button className="btn btn-primary" onClick={() => openModal("expense")}>＋ Add expense</button>} secondary={<button className="btn btn-secondary" onClick={exportExpenses}>⇩ Export CSV</button>} />{expenses.length ? <div className="panel table-panel"><div className="data-table expense-table"><div className="table-row table-header"><span>Expense</span><span>Order</span><span>Person</span><span>Category / vendor</span><span>Payment</span><span>Amount</span><span>Receipt</span></div>{expenses.map((expense) => { const order = orderById(expense.orderId); return <div className="table-row" key={expense.id}><div><strong>{expense.description || expense.expenseNo}</strong><small>{expense.expenseNo} · {shortDate(expense.expenseDate)}</small></div><div><strong>{order ? orderDisplayTitle(order) : "—"}</strong><small>{order?.orderNo || ""}</small></div><div className="entity-inline"><span className="avatar tiny">{initials(personById(expense.personId)?.name || "NA")}</span><span>{personById(expense.personId)?.name || "—"}</span></div><div><strong>{expense.category}</strong><small>{expense.vendor || "No vendor"}</small></div><span>{expense.paymentMode}</span><strong className="negative">{fmt(expense.amount)}</strong>{expense.receiptKey ? <a className="file-link" href={`/api/upload?key=${encodeURIComponent(expense.receiptKey)}`} target="_blank" rel="noreferrer">▤ View</a> : <span className="muted">—</span>}</div>; })}</div></div> : <EmptyState title="Record an order expense" copy="Choose the order and person responsible, then attach a receipt if available." action="Add expense" onClick={() => openModal("expense")} />}</div>;
+type ExpensePeriod = "today" | "week" | "month" | "custom";
+type ExpenseBreakdown = { id: string; name: string; detail: string; amount: number; count: number };
+type SpreadsheetValue = string | number;
+
+function expensePeriodRange(period: ExpensePeriod, customFrom: string, customTo: string) {
+  const now = new Date();
+  const end = today();
+  if (period === "today") return { from: end, to: end, label: "Today" };
+  if (period === "week") {
+    const start = new Date(now);
+    const daysFromMonday = (start.getDay() + 6) % 7;
+    start.setDate(start.getDate() - daysFromMonday);
+    return { from: dateInputValue(start), to: end, label: "This week" };
+  }
+  if (period === "month") {
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    return { from: dateInputValue(start), to: end, label: "This month" };
+  }
+  return { from: customFrom || end, to: customTo || customFrom || end, label: `${shortDate(customFrom || end)} to ${shortDate(customTo || customFrom || end)}` };
+}
+
+function expenseBreakdown(expenses: Expense[], keyFor: (expense: Expense) => { id: string; name: string; detail: string }): ExpenseBreakdown[] {
+  const rows = new Map<string, ExpenseBreakdown>();
+  for (const expense of expenses) {
+    const key = keyFor(expense);
+    const current = rows.get(key.id);
+    rows.set(key.id, current
+      ? { ...current, amount: current.amount + expense.amount, count: current.count + 1 }
+      : { ...key, amount: expense.amount, count: 1 });
+  }
+  return [...rows.values()].sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name));
+}
+
+function paymentMatchesOrder(payment: Payment, order: Order) {
+  if (payment.orderId === order.id) return true;
+  const manualOrderReference = payment.manualOrderId.trim().toLowerCase();
+  const orderNumber = order.orderNo.trim().toLowerCase();
+  return Boolean(manualOrderReference)
+    && payment.direction === "Received"
+    && payment.customerId === order.customerId
+    && manualOrderReference === orderNumber;
+}
+
+function xmlValue(value: SpreadsheetValue) {
+  return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+function spreadsheetWorksheet(name: string, rows: SpreadsheetValue[][]) {
+  return `<Worksheet ss:Name="${xmlValue(name)}"><Table>${rows.map((row, rowIndex) => `<Row>${row.map((value) => `<Cell${rowIndex === 0 ? ' ss:StyleID="Header"' : ""}><Data ss:Type="${typeof value === "number" ? "Number" : "String"}">${xmlValue(value)}</Data></Cell>`).join("")}</Row>`).join("")}</Table></Worksheet>`;
+}
+
+function downloadExpenseSpreadsheet(sheets: Array<{ name: string; rows: SpreadsheetValue[][] }>, fileName: string) {
+  const workbook = `<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Styles><Style ss:ID="Default"><Alignment ss:Vertical="Center"/><Font ss:FontName="Calibri" ss:Size="11"/></Style><Style ss:ID="Header"><Font ss:Bold="1" ss:Color="#FFFFFF"/><Interior ss:Color="#176B50" ss:Pattern="Solid"/></Style></Styles>${sheets.map((sheet) => spreadsheetWorksheet(sheet.name, sheet.rows)).join("")}</Workbook>`;
+  const url = URL.createObjectURL(new Blob([workbook], { type: "application/vnd.ms-excel" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function BreakdownPanel({ title, eyebrow, rows, total }: { title: string; eyebrow: string; rows: ExpenseBreakdown[]; total: number }) {
+  const max = Math.max(...rows.map((row) => row.amount), 1);
+  return <article className="panel expense-breakdown-panel"><div className="panel-head"><div><span className="overline">{eyebrow}</span><h3>{title}</h3></div><strong>{fmt(total)}</strong></div><div className="expense-breakdown-list">{rows.map((row) => <div className="expense-breakdown-row" key={row.id}><div><strong>{row.name}</strong><span>{row.detail} · {row.count} record{row.count === 1 ? "" : "s"}</span></div><strong>{fmt(row.amount)}</strong><i><b style={{ width: `${(row.amount / max) * 100}%` }} /></i></div>)}{!rows.length && <div className="mini-empty">No expenses match this filter.</div>}</div></article>;
+}
+
+function ExpensesPage({ data, user, openModal }: { data: AppData; user: PublicUser; openModal: (kind: Exclude<ModalKind, null>) => void }) {
+  const [period, setPeriod] = useState<ExpensePeriod>("month");
+  const [customFrom, setCustomFrom] = useState(today());
+  const [customTo, setCustomTo] = useState(today());
+  const [selectedOrderId, setSelectedOrderId] = useState("");
+  const dateRange = useMemo(() => expensePeriodRange(period, customFrom, customTo), [period, customFrom, customTo]);
+  const filteredExpenses = useMemo(() => data.expenses.filter((expense) =>
+    expense.expenseDate >= dateRange.from
+    && expense.expenseDate <= dateRange.to
+    && (!selectedOrderId || expense.orderId === selectedOrderId)
+  ), [data.expenses, dateRange, selectedOrderId]);
+  const selectedOrder = data.orders.find((order) => order.id === selectedOrderId);
+  const personById = (id: string) => data.persons.find((person) => person.id === id);
+  const orderById = (id: string) => data.orders.find((order) => order.id === id);
+  const customerById = (id: string) => data.customers.find((customer) => customer.id === id);
+  const total = filteredExpenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const average = filteredExpenses.length ? total / filteredExpenses.length : 0;
+  const personCount = new Set(filteredExpenses.map((expense) => expense.personId).filter(Boolean)).size;
+  const orderRows = expenseBreakdown(filteredExpenses, (expense) => {
+    const order = orderById(expense.orderId);
+    return { id: expense.orderId || "unassigned", name: order?.orderNo || "Order not available", detail: order ? orderDisplayTitle(order) : "Unassigned order" };
+  });
+  const personRows = expenseBreakdown(filteredExpenses, (expense) => {
+    const person = personById(expense.personId);
+    return { id: expense.personId || "unassigned", name: person?.name || "Person not available", detail: person?.role || "No responsible person" };
+  });
+  const categoryRows = expenseBreakdown(filteredExpenses, (expense) => ({ id: expense.category, name: expense.category, detail: "Expense category" }));
+  const supervisorRows = expenseBreakdown(filteredExpenses.filter((expense) => {
+    const person = personById(expense.personId);
+    const order = orderById(expense.orderId);
+    const role = person?.role.toLowerCase() || "";
+    return Boolean(person && (person.id === order?.assignedPersonId || role.includes("supervisor")));
+  }), (expense) => {
+    const person = personById(expense.personId);
+    return { id: expense.personId, name: person?.name || "Supervisor", detail: person?.role || "Supervisor" };
+  });
+  const topSupervisor = supervisorRows[0];
+  const orderExpenses = selectedOrder ? data.expenses.filter((expense) => expense.orderId === selectedOrder.id) : [];
+  const orderExpenseTotal = orderExpenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const supervisorExpenseTotal = selectedOrder ? orderExpenses.filter((expense) => {
+    const person = personById(expense.personId);
+    const role = person?.role.toLowerCase() || "";
+    return Boolean(person && (person.id === selectedOrder.assignedPersonId || role.includes("supervisor")));
+  }).reduce((sum, expense) => sum + expense.amount, 0) : 0;
+  const selectedOrderPayments = selectedOrder ? data.payments.filter((payment) => paymentMatchesOrder(payment, selectedOrder)) : [];
+  const orderReceived = selectedOrderPayments.filter((payment) => payment.direction === "Received").reduce((sum, payment) => sum + payment.amount, 0);
+  const vendorPaid = selectedOrderPayments.filter((payment) => payment.direction === "Paid").reduce((sum, payment) => sum + payment.amount, 0);
+  const vendorCommitment = selectedOrder ? data.orderVendors.filter((assignment) => assignment.orderId === selectedOrder.id).reduce((sum, assignment) => sum + assignment.amount, 0) : 0;
+  const remainingCustomerBalance = selectedOrder ? Math.max(0, selectedOrder.contractValue - orderReceived) : 0;
+  const vendorBalance = Math.max(0, vendorCommitment - vendorPaid);
+  const selectedCustomer = selectedOrder ? customerById(selectedOrder.customerId) : undefined;
+  const selectedSalesperson = selectedOrder ? personById(selectedOrder.salespersonId) : undefined;
+  const selectedSupervisor = selectedOrder ? personById(selectedOrder.assignedPersonId) : undefined;
+
+  const exportFilteredExpenses = () => {
+    const summaryRows: SpreadsheetValue[][] = [
+      ["Expense report summary", "Value"],
+      ["Period", dateRange.label],
+      ["Order filter", selectedOrder?.orderNo || "All order IDs"],
+      ["Expense records", filteredExpenses.length],
+      ["Total expenses", total],
+      ["People spending", personCount],
+      ["Average expense", average],
+      ["Top supervisor spender", topSupervisor?.name || "No supervisor expense"],
+      ["Top supervisor spend", topSupervisor?.amount || 0],
+    ];
+    const detailRows: SpreadsheetValue[][] = [["Expense no", "Date", "Order ID", "Order title", "Responsible person", "Role", "Category", "Description", "Payment mode", "Amount"], ...filteredExpenses.map((expense) => {
+      const order = orderById(expense.orderId);
+      const person = personById(expense.personId);
+      return [expense.expenseNo, expense.expenseDate, order?.orderNo || "", order ? orderDisplayTitle(order) : "", person?.name || "", person?.role || "", expense.category, expense.description, expense.paymentMode, expense.amount];
+    })];
+    const orderSummaryRows: SpreadsheetValue[][] = [["Order ID", "Order title", "Expense records", "Total expenses"], ...orderRows.map((row) => [row.name, row.detail, row.count, row.amount])];
+    const personSummaryRows: SpreadsheetValue[][] = [["Responsible person", "Role", "Expense records", "Total expenses"], ...personRows.map((row) => [row.name, row.detail, row.count, row.amount])];
+    const categorySummaryRows: SpreadsheetValue[][] = [["Category", "Expense records", "Total expenses"], ...categoryRows.map((row) => [row.name, row.count, row.amount])];
+    const sheets = [
+      { name: "Summary", rows: summaryRows },
+      { name: "Expense detail", rows: detailRows },
+      { name: "Order summary", rows: orderSummaryRows },
+      { name: "Person summary", rows: personSummaryRows },
+      { name: "Category summary", rows: categorySummaryRows },
+    ];
+    if (selectedOrder) sheets.push({ name: "Order financials", rows: [
+      ["Order financial detail", "Value"],
+      ["Order ID", selectedOrder.orderNo],
+      ["Customer", selectedCustomer?.businessName || selectedCustomer?.name || ""],
+      ["Total order value", selectedOrder.contractValue],
+      ["Customer receipts", orderReceived],
+      ["Remaining customer balance", remainingCustomerBalance],
+      ["Vendor commitment", vendorCommitment],
+      ["Vendor payouts", vendorPaid],
+      ["Vendor balance", vendorBalance],
+      ["All order expenses", orderExpenseTotal],
+      ["Supervisor expenses", supervisorExpenseTotal],
+      ["Salesperson", selectedSalesperson?.name || ""],
+      ["Supervisor", selectedSupervisor?.name || ""],
+      ["Delivery", `${selectedOrder.deliveryDate || selectedOrder.eventDate} ${selectedOrder.deliveryTime || ""}`.trim()],
+      ["Pickup", `${selectedOrder.pickupDate || ""} ${selectedOrder.pickupTime || ""}`.trim()],
+    ] });
+    downloadExpenseSpreadsheet(sheets, `expense-report-${dateRange.from}-to-${dateRange.to}.xls`);
+  };
+
+  return <div className="section-stack expense-dashboard"><PageHead copy={`${filteredExpenses.length} expense records · ${fmt(total)} for ${dateRange.label.toLowerCase()}.`} action={<button className="btn btn-primary" onClick={() => openModal("expense")}>＋ Add expense</button>} secondary={<button className="btn btn-secondary" onClick={exportFilteredExpenses}>⇩ Export Excel</button>} />
+    <section className="panel expense-filter-panel" aria-label="Expense report filters"><div><span className="overline">Reporting period</span><h2>Expense intelligence</h2><p>Compare spending by order, person and category, then export the exact filtered view.</p></div><div className="expense-period-tabs" role="group" aria-label="Expense period">{([['today', 'Today'], ['week', 'This week'], ['month', 'This month'], ['custom', 'Custom']] as Array<[ExpensePeriod, string]>).map(([value, label]) => <button type="button" className={period === value ? "active" : ""} aria-pressed={period === value} onClick={() => setPeriod(value)} key={value}>{label}</button>)}</div><div className="expense-filter-fields"><label><span>Order ID</span><select value={selectedOrderId} onChange={(event) => setSelectedOrderId(event.target.value)}><option value="">All order IDs</option>{data.orders.map((order) => <option value={order.id} key={order.id}>{order.orderNo}{order.title ? ` · ${order.title}` : ""}</option>)}</select></label>{period === "custom" && <><label><span>From date</span><input type="date" value={customFrom} max={customTo} onChange={(event) => setCustomFrom(event.target.value)} /></label><label><span>To date</span><input type="date" value={customTo} min={customFrom} onChange={(event) => setCustomTo(event.target.value)} /></label></>}</div></section>
+    <section className="expense-summary-grid"><MetricCard label="Expense total" value={fmt(total)} change={dateRange.label} icon="₹" tone="orange" /><MetricCard label="Expense records" value={String(filteredExpenses.length)} change={selectedOrder ? selectedOrder.orderNo : "Across all orders"} icon="▤" tone="blue" /><MetricCard label="People spending" value={String(personCount)} change="Responsible team members" icon="♧" tone="green" /><MetricCard label="Average expense" value={fmt(average)} change="Per filtered record" icon="↗" tone="red" /></section>
+    <section className="expense-analysis-grid"><BreakdownPanel title="Order-wise expenses" eyebrow="Jobs" rows={orderRows} total={total} /><BreakdownPanel title="Person-wise expenses" eyebrow="Responsibility" rows={personRows} total={total} /><BreakdownPanel title="Category-wise expenses" eyebrow="Cost type" rows={categoryRows} total={total} /></section>
+    <section className="panel top-supervisor-panel"><div className="top-supervisor-icon">♙</div><div><span className="overline">Top supervisor spender</span><h3>{topSupervisor?.name || "No supervisor expense in this view"}</h3><p>{topSupervisor ? `${topSupervisor.count} expense record${topSupervisor.count === 1 ? "" : "s"} · ${topSupervisor.detail}${selectedOrder ? ` · ${selectedOrder.orderNo}` : ""}` : "Supervisor spending will appear after an expense is recorded."}</p></div><strong>{fmt(topSupervisor?.amount || 0)}</strong></section>
+    {selectedOrder && user.role !== "supervisor" && <section className="panel order-financial-panel"><div className="order-financial-head"><div><span className="overline">Complete order ledger</span><h2>{selectedOrder.orderNo} · {orderDisplayTitle(selectedOrder)}</h2><p>{selectedCustomer?.businessName || selectedCustomer?.name || "Customer"} · <Status value={selectedOrder.status} /></p></div><div className="order-financial-identity"><span>Customer</span><strong>{selectedCustomer?.businessName || selectedCustomer?.name || "Not available"}</strong></div></div><div className="order-financial-metrics"><div><span>Total order value</span><strong>{fmt(selectedOrder.contractValue)}</strong></div><div><span>Customer receipts</span><strong className="positive">{fmt(orderReceived)}</strong></div><div><span>Remaining customer balance</span><strong className={remainingCustomerBalance ? "negative" : "positive"}>{fmt(remainingCustomerBalance)}</strong></div><div><span>Vendor commitment</span><strong>{fmt(vendorCommitment)}</strong></div><div><span>Vendor payouts</span><strong>{fmt(vendorPaid)}</strong></div><div><span>Vendor balance</span><strong className={vendorBalance ? "negative" : "positive"}>{fmt(vendorBalance)}</strong></div><div><span>All order expenses</span><strong>{fmt(orderExpenseTotal)}</strong></div><div><span>Supervisor expenses</span><strong>{fmt(supervisorExpenseTotal)}</strong></div></div><div className="order-detail-grid"><div><span>Salesperson</span><strong>{selectedSalesperson?.name || "Not assigned"}</strong></div><div><span>Supervisor</span><strong>{selectedSupervisor?.name || "Not assigned"}</strong></div><div><span>Delivery</span><strong>{shortDate(selectedOrder.deliveryDate || selectedOrder.eventDate)} · {selectedOrder.deliveryTime || "Time not added"}</strong></div><div><span>Pickup</span><strong>{shortDate(selectedOrder.pickupDate)} · {selectedOrder.pickupTime || "Time not added"}</strong></div><div><span>Delivery address</span><strong>{selectedOrder.deliveryAddress || selectedOrder.venue || (selectedOrder.pickupFromGodown ? "Pickup from godown" : "Not added")}</strong></div><div><span>Contact person</span><strong>{selectedOrder.contactPerson ? `${selectedOrder.contactPerson} · ${selectedOrder.contactPhone}` : "Not added"}</strong></div></div></section>}
+    {selectedOrder && user.role === "supervisor" && <div className="form-hint">The filtered expense analysis above covers your assigned order. Order values, customer receipts and vendor pricing remain restricted to Admin and Accountant users.</div>}
+    <section className="panel expense-detail-panel"><div className="panel-head"><div><span className="overline">Filtered ledger</span><h3>Expense details</h3></div><span className="expense-result-count">{filteredExpenses.length} result{filteredExpenses.length === 1 ? "" : "s"}</span></div>{filteredExpenses.length ? <div className="table-panel"><div className="data-table expense-table"><div className="table-row table-header"><span>Expense</span><span>Order</span><span>Responsible person</span><span>Category</span><span>Payment</span><span>Amount</span><span>Receipt</span></div>{filteredExpenses.map((expense) => { const order = orderById(expense.orderId); const person = personById(expense.personId); return <div className="table-row" key={expense.id}><div><strong>{expense.description || expense.expenseNo}</strong><small>{expense.expenseNo} · {shortDate(expense.expenseDate)}</small></div><div><strong>{order?.orderNo || "—"}</strong><small>{order ? orderDisplayTitle(order) : "Order not available"}</small></div><div className="entity-inline"><span className="avatar tiny">{initials(person?.name || "NA")}</span><span>{person?.name || "—"}</span></div><strong>{expense.category}</strong><span>{expense.paymentMode}</span><strong className="negative">{fmt(expense.amount)}</strong>{expense.receiptKey ? <a className="file-link" href={`/api/upload?key=${encodeURIComponent(expense.receiptKey)}`} target="_blank" rel="noreferrer">▤ View</a> : <span className="muted">—</span>}</div>; })}</div></div> : <div className="mini-empty">No expenses match this reporting period and order selection.</div>}</section>
+  </div>;
 }
 
 function PaymentsPage({ payments, customerById, orderById, vendorById, openModal, editPayment }: { payments: Payment[]; customerById: (id: string) => Customer | undefined; orderById: (id: string) => Order | undefined; vendorById: (id: string) => Vendor | undefined; openModal: (kind: Exclude<ModalKind, null>) => void; editPayment: (payment: Payment) => void }) {
@@ -406,12 +586,19 @@ function RecordModal({ kind, data, user, preferredVendorId, editingOrder, editin
   const [paymentVendorId, setPaymentVendorId] = useState(editingPayment?.vendorId ?? "");
   const [manualOrderEntry, setManualOrderEntry] = useState(Boolean(editingPayment?.manualOrderId));
   const [paymentOrderId, setPaymentOrderId] = useState(editingPayment?.manualOrderId ? "__manual__" : editingPayment?.orderId ?? "");
-  const [paymentAllocations, setPaymentAllocations] = useState<Record<string, number>>({});
-  const [orderVendorDrafts, setOrderVendorDrafts] = useState<OrderVendorDraft[]>([]);
+	  const [paymentAllocations, setPaymentAllocations] = useState<Record<string, number>>({});
+	  const [orderVendorDrafts, setOrderVendorDrafts] = useState<OrderVendorDraft[]>([]);
+	  const [orderProductDrafts, setOrderProductDrafts] = useState<OrderProductDraft[]>(() => {
+	    if (!editingOrder) return [];
+	    const products = data.orderProducts.filter((product) => product.orderId === editingOrder.id);
+	    if (products.length) return products.map((product) => ({ key: product.id, name: product.name, quantity: product.quantity, price: product.price }));
+	    return editingOrder.productName ? [{ key: `legacy-${editingOrder.id}`, name: editingOrder.productName, quantity: 1, price: editingOrder.productPrice }] : [];
+	  });
   const [assignmentVendorId, setAssignmentVendorId] = useState("");
   const [assignmentProductId, setAssignmentProductId] = useState("");
   const [assignmentMeasurement, setAssignmentMeasurement] = useState(1);
   const [assignmentDays, setAssignmentDays] = useState(1);
+  const [expenseOrderId, setExpenseOrderId] = useState("");
   const [pickupFromGodown, setPickupFromGodown] = useState(Boolean(editingOrder?.pickupFromGodown));
   const nextOrder = `ORD-${String(data.orders.length + 1).padStart(4, "0")}`; const nextExpense = `EXP-${String(data.expenses.length + 1).padStart(4, "0")}`; const paymentDirections = ["Received", "Paid"].filter((direction) => canRecordPayment(user.role, direction));
   const canAllocateMultipleOrders = ["admin", "accountant"].includes(user.role) && !editingPayment;
@@ -429,7 +616,9 @@ function RecordModal({ kind, data, user, preferredVendorId, editingOrder, editin
   const tentativeCost = assignmentProduct ? calculateTentativeCost(assignmentProduct.rentalCharge, assignmentProduct.pricingBasis, assignmentMeasurement, assignmentDays) : 0;
   const editingOrderReceived = editingOrder ? data.payments.filter((payment) => payment.orderId === editingOrder.id && payment.direction === "Received").reduce((sum, payment) => sum + payment.amount, 0) : 0;
   const editingOrderRemaining = editingOrder ? Math.max(0, editingOrder.contractValue - editingOrderReceived) : 0;
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="record-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-head"><div><span className="overline">eKhata workspace</span><h2 id="modal-title">{kind === "order" && editingOrder ? "Edit order" : kind === "payment" && editingPayment ? "Edit payment" : kind === "vendorProduct" && editingVendorProduct ? "Edit vendor product" : modalTitles[kind]}</h2><p>Fields marked with * are required.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><form onSubmit={onSubmit}><div className="form-grid">
+  const selectedExpenseOrder = data.orders.find((order) => order.id === expenseOrderId);
+  const eligibleExpensePeople = data.persons.filter((person) => isExpenseResponsiblePerson(person, selectedExpenseOrder));
+	  return <div className="modal-backdrop" role="presentation" onMouseDown={kind === "order" ? undefined : (event) => event.target === event.currentTarget && onClose()}><div className="record-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-head"><div><span className="overline">eKhata workspace</span><h2 id="modal-title">{kind === "order" && editingOrder ? "Edit order" : kind === "payment" && editingPayment ? "Edit payment" : kind === "vendorProduct" && editingVendorProduct ? "Edit vendor product" : modalTitles[kind]}</h2><p>Fields marked with * are required.</p></div><button type="button" className="modal-close" onClick={onClose} aria-label={kind === "order" ? "Close order form" : "Close form"}>×</button></div><form onSubmit={onSubmit}><div className="form-grid">
     {kind === "customer" && <><Field label="Contact person *"><input name="name" required placeholder="e.g. Rohan Mehta" /></Field><Field label="Business / company name *"><input name="businessName" required placeholder="e.g. Quest Strategy" /></Field><Field label="Phone number *"><input name="phone" required inputMode="tel" placeholder="+91 98xxxxxx" /></Field><Field label="Email"><input name="email" type="email" placeholder="accounts@company.com" /></Field><Field label="GSTIN"><input name="gstin" placeholder="27ABCDE1234F1Z5" /></Field><Field label="Opening balance"><input name="openingBalance" type="number" defaultValue="0" /></Field><Field label="Billing address" wide><textarea name="address" rows={3} placeholder="Full billing address" /></Field></>}
     {kind === "person" && <><Field label="Full name *"><input name="name" required placeholder="Person or vendor name" /></Field><Field label="Role / type *"><select name="role" required defaultValue=""><option value="" disabled>Select role</option><option>Team member</option><option>Supervisor</option><option>Execution manager</option><option>Labour supervisor</option><option>Sales person</option><option>Sales & billing</option><option>Accountant</option><option>Vendor</option><option>Contractor</option></select></Field><Field label="Phone number *"><input name="phone" required inputMode="tel" placeholder="+91 98xxxxxx" /></Field><Field label="Email"><input name="email" type="email" placeholder="name@example.com" /></Field><Field label="Preferred payment mode"><select name="paymentMode"><option>UPI</option><option>Bank transfer</option><option>Cash</option><option>Cheque</option></select></Field>{user.role === "supervisor" && <Field label="Associated active order *"><OrderSelect orders={data.orders} name="orderId" /></Field>}</>}
     {kind === "vendor" && <><Field label="Vendor name *"><input name="name" required placeholder="Business or supplier name" /></Field><Field label="Contact person"><input name="contactPerson" placeholder="Primary contact" /></Field><Field label="Phone number *"><input name="phone" required inputMode="tel" placeholder="+91 98xxxxxx" /></Field><Field label="Email"><input name="email" type="email" placeholder="accounts@vendor.com" /></Field><Field label="GSTIN"><input name="gstin" placeholder="27ABCDE1234F1Z5" /></Field><Field label="Preferred payment mode"><select name="paymentMode"><option>Bank transfer</option><option>UPI</option><option>Cash</option><option>Cheque</option></select></Field><Field label="Address" wide><textarea name="address" rows={3} placeholder="Vendor address" /></Field></>}
@@ -458,12 +647,11 @@ function RecordModal({ kind, data, user, preferredVendorId, editingOrder, editin
       <Field label="Pickup / return time *"><input name="pickupTime" required type="time" defaultValue={editingOrder?.pickupTime ?? ""} /></Field>
       <Field label={`Pickup address${pickupFromGodown ? " (optional)" : " *"}`} wide><textarea name="pickupAddress" required={!pickupFromGodown} rows={2} defaultValue={editingOrder?.pickupAddress ?? ""} placeholder="Address for collecting rented items" /></Field>
       <Field label={`Contact person${pickupFromGodown ? " (optional)" : " *"}`}><input name="contactPerson" required={!pickupFromGodown} defaultValue={editingOrder?.contactPerson ?? ""} placeholder="On-site contact name" /></Field>
-      <Field label={`Contact phone${pickupFromGodown ? " (optional)" : " *"}`}><input name="contactPhone" required={!pickupFromGodown} inputMode="tel" defaultValue={editingOrder?.contactPhone ?? ""} placeholder="Contact number" /></Field>
-      {user.role !== "supervisor" && <>
-        <Field label="Product name (optional)"><input name="productName" defaultValue={editingOrder?.productName ?? ""} placeholder="Product or package name" /></Field>
-        <Field label="Product price (optional)"><input name="productPrice" type="number" min="0" defaultValue={editingOrder?.productPrice || ""} placeholder="0" /></Field>
-        <Field label="Order value *"><input name="contractValue" required type="number" min="1" defaultValue={editingOrder?.contractValue} placeholder="0" /></Field>
-      </>}
+	      <Field label={`Contact phone${pickupFromGodown ? " (optional)" : " *"}`}><input name="contactPhone" required={!pickupFromGodown} inputMode="tel" defaultValue={editingOrder?.contactPhone ?? ""} placeholder="Contact number" /></Field>
+	      {user.role !== "supervisor" && <>
+	        <div className="field field-wide order-product-builder"><span>Products for this order (optional)</span>{orderProductDrafts.map((draft, index) => <div className="order-product-draft" key={draft.key}><input aria-label={`Product name ${index + 1}`} required placeholder="Product name" value={draft.name} onChange={(event) => setOrderProductDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, name: event.target.value } : item))} /><input aria-label={`Quantity for product ${index + 1}`} required type="number" min="1" step="1" placeholder="Quantity" value={draft.quantity || ""} onChange={(event) => setOrderProductDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, quantity: Math.max(0, Math.round(Number(event.target.value) || 0)) } : item))} /><input aria-label={`Price for product ${index + 1}`} required type="number" min="1" step="1" placeholder="Price" value={draft.price || ""} onChange={(event) => setOrderProductDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, price: Math.max(0, Math.round(Number(event.target.value) || 0)) } : item))} /><strong>{fmt(draft.quantity * draft.price)}</strong><button type="button" className="icon-btn" aria-label={`Remove product ${index + 1}`} onClick={() => setOrderProductDrafts((current) => current.filter((item) => item.key !== draft.key))}>×</button></div>)}<button type="button" className="btn btn-secondary btn-small" onClick={() => setOrderProductDrafts((current) => [...current, { key: crypto.randomUUID(), name: "", quantity: 1, price: 0 }])}>＋ Add another product</button><input type="hidden" name="products" value={JSON.stringify(orderProductDrafts.map(({ name, quantity, price }) => ({ name, quantity, price })))} /></div>
+	        <Field label="Order value *"><input name="contractValue" required type="number" min="1" defaultValue={editingOrder?.contractValue} placeholder="0" /></Field>
+	      </>}
       {editingOrder && user.role !== "supervisor" && <div className="field field-wide order-payment-summary">
         <span>Order payment position</span>
         <div><strong>Received against order: {fmt(editingOrderReceived)}</strong><strong>Remaining payment: {fmt(editingOrderRemaining)}</strong></div>
@@ -481,7 +669,7 @@ function RecordModal({ kind, data, user, preferredVendorId, editingOrder, editin
       {!editingOrder && user.role === "admin" && <div className="field field-wide order-vendor-builder"><span>Vendors for this order</span>{orderVendorDrafts.map((draft, index) => <div className="order-vendor-draft" key={draft.key}><VendorSelect vendors={data.vendors} name={`vendor-draft-${index}`} defaultValue={draft.vendorId} onChange={(vendorId) => setOrderVendorDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, vendorId } : item))} /><input aria-label={`Product for vendor ${index + 1}`} required placeholder="Product or service" value={draft.productName} onChange={(event) => setOrderVendorDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, productName: event.target.value } : item))} /><input aria-label={`Amount for vendor ${index + 1}`} required type="number" min="1" placeholder="Amount" value={draft.amount || ""} onChange={(event) => setOrderVendorDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, amount: Math.max(0, Math.round(Number(event.target.value) || 0)) } : item))} /><button type="button" className="icon-btn" aria-label={`Remove vendor ${index + 1}`} onClick={() => setOrderVendorDrafts((current) => current.filter((item) => item.key !== draft.key))}>×</button></div>)}<button type="button" className="btn btn-secondary btn-small" onClick={() => setOrderVendorDrafts((current) => [...current, { key: crypto.randomUUID(), vendorId: "", productName: "", amount: 0, notes: "" }])}>＋ Add another vendor</button><input type="hidden" name="vendorAssignments" value={JSON.stringify(orderVendorDrafts.map(({ vendorId, productName, amount, notes }) => ({ vendorId, productName, amount, notes })))} /></div>}
       {editingOrder?.attachmentKey && user.role !== "supervisor" && <a className="file-link field-wide" href={`/api/upload?key=${encodeURIComponent(editingOrder.attachmentKey)}`} target="_blank" rel="noreferrer">▤ View attached {editingOrder.attachmentName || "order document"}</a>}
     </>}
-    {kind === "expense" && <><Field label="Expense number *"><input name="expenseNo" required defaultValue={nextExpense} /></Field><Field label="Order *"><OrderSelect orders={data.orders} name="orderId" /></Field>{user.role !== "supervisor" && <Field label="Person responsible *"><PersonSelect persons={data.persons} name="personId" /></Field>}<Field label="Expense date *"><input name="expenseDate" required type="date" defaultValue={today()} /></Field><Field label="Category *"><select name="category" required><option>Material rental</option><option>Fabrication</option><option>Labour</option><option>Transport</option><option>Venue</option><option>Food & hospitality</option><option>Printing & branding</option><option>Miscellaneous</option></select></Field><Field label="Vendor / payee"><VendorSelect vendors={data.vendors} name="vendorId" optional /></Field><Field label="Amount *"><input name="amount" required type="number" min="1" placeholder="0" /></Field><Field label="Payment mode"><select name="paymentMode"><option>UPI</option><option>Bank transfer</option><option>Cash</option><option>Credit card</option><option>Cheque</option></select></Field><Field label="Description" wide><textarea name="description" rows={2} placeholder="What was this expense for?" /></Field><FileField file={file} setFile={setFile} label="Attach receipt (optional)" /></>}
+    {kind === "expense" && <><Field label="Expense number *"><input name="expenseNo" required defaultValue={nextExpense} /></Field><Field label="Order *"><OrderSelect orders={data.orders} name="orderId" value={expenseOrderId} onChange={setExpenseOrderId} /></Field>{user.role !== "supervisor" && <Field label="Person responsible *"><PersonSelect persons={eligibleExpensePeople} name="personId" emptyLabel={expenseOrderId ? "No eligible active person for this order" : "Select an order first"} /></Field>}<Field label="Expense date *"><input name="expenseDate" required type="date" defaultValue={today()} /></Field><Field label="Category *"><select name="category" required>{EXPENSE_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></Field><Field label="Amount *"><input name="amount" required type="number" min="1" placeholder="0" /></Field><Field label="Payment mode"><select name="paymentMode"><option>UPI</option><option>Bank transfer</option><option>Cash</option><option>Credit card</option><option>Cheque</option></select></Field><Field label="Description" wide><textarea name="description" rows={2} placeholder="What was this expense for?" /></Field><FileField file={file} setFile={setFile} label="Attach receipt (optional)" /></>}
     {kind === "payment" && <>
       <Field label="Payment type *">
         <select name="direction" required value={paymentDirection} onChange={(event) => {
@@ -561,13 +749,13 @@ function RecordModal({ kind, data, user, preferredVendorId, editingOrder, editin
       <Field label="Reference"><input name="reference" defaultValue={editingPayment?.reference} placeholder="UTR, cheque no. or reference" /></Field>
       <Field label="Notes"><input name="notes" defaultValue={editingPayment?.notes} placeholder="Short payment note" /></Field>
     </>}
-  </div>{kind === "order" && (!data.customers.length || !data.persons.length) && <div className="form-hint">Add at least one customer and one person before saving this record.</div>}{kind === "order" && user.role === "admin" && <div className="form-hint">All active salespeople and supervisors are listed from People and linked Team Access roles.</div>}{kind === "order" && user.role === "sales" && <div className="form-hint">You are assigned as the salesperson automatically. Select the supervisor who will receive this order on their dashboard.{!user.personId ? " Ask an administrator to link your Team Access account to your People record first." : ""}</div>}{kind === "expense" && (!data.orders.length || !data.persons.length) && <div className="form-hint">Create an order and add a person before recording its expense.</div>}{kind === "payment" && <div className="form-hint">Choose the customer for money received to see all of that customer&apos;s orders. If the order is not listed, use Enter Order ID manually. Accountants can allocate one new payment across several listed orders. Vendor payouts still require a vendor assigned to the selected order.</div>}{error && <div className="form-error" role="alert">! {error}</div>}<div className="modal-actions"><button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? "Saving…" : kind === "order" && editingOrder ? "Update order" : kind === "payment" && editingPayment ? "Update payment" : kind === "vendorProduct" && editingVendorProduct ? "Update vendor product" : `Save ${kind}`}</button></div></form></div></div>;
+	</div>{kind === "order" && (!data.customers.length || !data.persons.length) && <div className="form-hint">Add at least one customer and one person before saving this record.</div>}{kind === "order" && user.role === "admin" && <div className="form-hint">All active People marked as salespeople or supervisors are listed; email and login access are not required. You can change both assignments while updating an order.</div>}{kind === "order" && user.role === "sales" && <div className="form-hint">You are assigned as the salesperson automatically. Select the supervisor who will receive this order on their dashboard.{!user.personId ? " Ask an administrator to link your Team Access account to your People record first." : ""}</div>}{kind === "expense" && user.role === "supervisor" && !data.orders.length && <div className="form-hint">An active assigned order is required before you can record an expense. Your identity is added automatically.</div>}{kind === "expense" && user.role !== "supervisor" && <div className="form-hint">Select an order first. Responsible-person options are limited to active salespeople, that order&apos;s assigned supervisor, and active manager roles.</div>}{kind === "payment" && <div className="form-hint">Choose the customer for money received to see all of that customer&apos;s orders. If the order is not listed, use Enter Order ID manually. Accountants can allocate one new payment across several listed orders. Vendor payouts still require a vendor assigned to the selected order.</div>}{error && <div className="form-error" role="alert">! {error}</div>}<div className="modal-actions"><button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? "Saving…" : kind === "order" && editingOrder ? "Update order" : kind === "payment" && editingPayment ? "Update payment" : kind === "vendorProduct" && editingVendorProduct ? "Update vendor product" : `Save ${kind}`}</button></div></form></div></div>;
 }
 
 function Field({ label, wide, children }: { label: string; wide?: boolean; children: React.ReactNode }) { return <label className={`field ${wide ? "field-wide" : ""}`}><span>{label}</span>{children}</label>; }
 function CustomerSelect({ customers, name, optional, defaultValue = "" }: { customers: Customer[]; name: string; optional?: boolean; defaultValue?: string }) { return <select name={name} required={!optional} defaultValue={defaultValue}><option value="">{customers.length ? "Select customer" : "Add a customer first"}</option>{customers.map((customer) => <option value={customer.id} key={customer.id}>{customer.businessName}</option>)}</select>; }
-function PersonSelect({ persons, name, defaultValue = "" }: { persons: Person[]; name: string; defaultValue?: string }) { return <select name={name} required defaultValue={defaultValue}><option value="">{persons.length ? "Select person" : "Add a person first"}</option>{persons.map((person) => <option value={person.id} key={person.id}>{person.name} · {person.role}</option>)}</select>; }
+function PersonSelect({ persons, name, defaultValue = "", emptyLabel = "Add a person first" }: { persons: Person[]; name: string; defaultValue?: string; emptyLabel?: string }) { return <select name={name} required defaultValue={defaultValue}><option value="">{persons.length ? "Select person" : emptyLabel}</option>{persons.map((person) => <option value={person.id} key={person.id}>{person.name} · {person.role}</option>)}</select>; }
 function TeamPersonSelect({ persons, teamAssignments, name, kind, defaultValue = "" }: { persons: Person[]; teamAssignments: TeamAssignment[]; name: string; kind: "salesperson" | "supervisor"; defaultValue?: string }) { const eligible = persons.filter((person) => isOrderTeamPerson(person, kind, teamAssignments)).sort((a, b) => a.name.localeCompare(b.name)); return <select name={name} required defaultValue={defaultValue}><option value="">{eligible.length ? `Select ${kind}` : `Add or link a ${kind} first`}</option>{eligible.map((person) => <option value={person.id} key={person.id}>{person.name} · {person.role}</option>)}</select>; }
 function VendorSelect({ vendors, name, optional, defaultValue = "", onChange }: { vendors: Vendor[]; name: string; optional?: boolean; defaultValue?: string; onChange?: (vendorId: string) => void }) { return <select name={name} required={!optional} defaultValue={defaultValue} onChange={onChange ? (event) => onChange(event.target.value) : undefined}><option value="">{vendors.length ? optional ? "No vendor" : "Select vendor" : "Add a vendor first"}</option>{vendors.map((vendor) => <option value={vendor.id} key={vendor.id}>{vendor.name}{vendor.contactPerson ? ` · ${vendor.contactPerson}` : ""}</option>)}</select>; }
-function OrderSelect({ orders, name }: { orders: Order[]; name: string }) { return <select name={name} required defaultValue=""><option value="">{orders.length ? "Select order" : "Create an order first"}</option>{orders.map((order) => <option value={order.id} key={order.id}>{order.orderNo}{order.title ? ` · ${order.title}` : ""}</option>)}</select>; }
+function OrderSelect({ orders, name, value, defaultValue = "", onChange }: { orders: Order[]; name: string; value?: string; defaultValue?: string; onChange?: (orderId: string) => void }) { return <select name={name} required value={value} defaultValue={value === undefined ? defaultValue : undefined} onChange={onChange ? (event) => onChange(event.target.value) : undefined}><option value="">{orders.length ? "Select order" : "Create an order first"}</option>{orders.map((order) => <option value={order.id} key={order.id}>{order.orderNo}{order.title ? ` · ${order.title}` : ""}</option>)}</select>; }
 function FileField({ file, setFile, label, kind = "receipt" }: { file: File | null; setFile: (file: File | null) => void; label: string; kind?: "receipt" | "order" }) { const orderDocument = kind === "order"; const accept = orderDocument ? "application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,.xls,.xlsx,.csv" : "application/pdf,image/jpeg,image/png,image/webp"; return <label className="upload-field field-wide"><input type="file" name="file" accept={accept} onChange={(event) => setFile(event.target.files?.[0] ?? null)} /><span className="upload-icon">⇧</span><strong>{file ? file.name : label}</strong><small>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB · Click to replace` : orderDocument ? "PDF, XLS, XLSX or CSV · maximum 10 MB" : "PDF, JPG, PNG or WebP · maximum 10 MB"}</small></label>; }

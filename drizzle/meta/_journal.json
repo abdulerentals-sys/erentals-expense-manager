@@ -71,6 +71,13 @@
       "when": 1787835599472,
       "tag": "0009_wandering_clea",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1787848291256,
+      "tag": "0010_typical_agent_zero",
+      "breakpoints": true
     }
   ]
 }

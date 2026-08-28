@@ -6,6 +6,7 @@ import {
   type Filter,
 } from "mongodb";
 import { isOrderTeamPerson, type TeamAssignment } from "../../auth/team";
+import { isAllowedExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis, type ProductType } from "../../vendor-pricing";
 
 type Payload = Record<string, unknown>;
@@ -66,6 +67,7 @@ type Order = {
   createdAt: string;
 };
 
+type OrderProduct = { id: string; orderId: string; name: string; quantity: number; price: number; amount: number; createdAt: string };
 type OrderVendor = { id: string; orderId: string; vendorId: string; productId: string; productName: string; productType: ProductType; pricingBasis: PricingBasis; unitRate: number; quantity: number; measurement: number; rentalDays: number; amount: number; notes: string; createdAt: string };
 
 type Invoice = {
@@ -128,6 +130,7 @@ type Collections = {
   vendors: Collection<Vendor>;
   vendorProducts: Collection<VendorProduct>;
   orders: Collection<Order>;
+  orderProducts: Collection<OrderProduct>;
   orderVendors: Collection<OrderVendor>;
   invoices: Collection<Invoice>;
   expenses: Collection<Expense>;
@@ -140,7 +143,20 @@ const money = (value: unknown) => Math.max(0, Math.round(Number(value) || 0));
 const positiveInteger = (value: unknown) => Math.max(1, Math.round(Number(value) || 1));
 
 type PaymentAllocation = { orderId: string; amount: number };
+type OrderProductInput = { name: string; quantity: number; price: number };
 type VendorAssignmentInput = { vendorId: string; productName: string; amount: number; notes: string };
+
+function orderProductInputs(payload: Payload): OrderProductInput[] {
+  let raw: unknown = payload.products;
+  if (typeof raw === "string" && raw.trim()) {
+    try { raw = JSON.parse(raw); } catch { return []; }
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    const row = item as Payload;
+    return { name: clean(row.name), quantity: money(row.quantity), price: money(row.price) };
+  }).filter((item) => item.name || item.quantity || item.price);
+}
 
 function vendorAssignments(payload: Payload): VendorAssignmentInput[] {
   let raw: unknown = payload.vendorAssignments;
@@ -243,6 +259,7 @@ function getCollections(db: Db): Collections {
     vendors: db.collection<Vendor>("vendors"),
     vendorProducts: db.collection<VendorProduct>("vendor_products"),
     orders: db.collection<Order>("orders"),
+    orderProducts: db.collection<OrderProduct>("order_products"),
     orderVendors: db.collection<OrderVendor>("order_vendors"),
     invoices: db.collection<Invoice>("invoices"),
     expenses: db.collection<Expense>("expenses"),
@@ -259,6 +276,7 @@ function ensureMongoIndexes(collections: Collections) {
       collections.vendorProducts.createIndex({ vendorId: 1, name: 1 }, { unique: true }),
       collections.orders.createIndex({ orderNo: 1 }, { unique: true }),
       collections.orders.createIndex({ customerId: 1 }),
+      collections.orderProducts.createIndex({ orderId: 1 }),
       collections.orderVendors.createIndex({ orderId: 1 }),
       collections.orderVendors.createIndex({ vendorId: 1 }),
       collections.invoices.createIndex({ invoiceNo: 1 }, { unique: true }),
@@ -307,12 +325,13 @@ export async function GET() {
   try {
     const { collections } = await getMongoDatabase();
     const options = { projection: { _id: 0 } };
-    const [customers, persons, vendors, vendorProducts, orders, orderVendors, invoices, expenses, payments] = await Promise.all([
+    const [customers, persons, vendors, vendorProducts, orders, orderProducts, orderVendors, invoices, expenses, payments] = await Promise.all([
       collections.customers.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.persons.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.vendors.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.vendorProducts.find({ status: { $ne: "Deleted" } }, options).sort({ createdAt: -1 }).toArray(),
       collections.orders.find({}, options).sort({ createdAt: -1 }).toArray(),
+      collections.orderProducts.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.orderVendors.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.invoices.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.expenses.find({}, options).sort({ createdAt: -1 }).toArray(),
@@ -343,7 +362,7 @@ export async function GET() {
       attachmentName: order.attachmentName || "",
       attachmentType: order.attachmentType || "",
     }));
-    return Response.json({ customers, persons, vendors, vendorProducts, orders: normalizedOrders, orderVendors, invoices, expenses, payments: normalizedPayments });
+    return Response.json({ customers, persons, vendors, vendorProducts, orders: normalizedOrders, orderProducts, orderVendors, invoices, expenses, payments: normalizedPayments });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Unable to load records" },
@@ -463,6 +482,11 @@ export async function POST(request: Request, context: RequestContext = { userRol
       if (advancePayment && (invalidDate(payload, ["advancePaymentDate"]) || !clean(payload.advancePaymentMethod))) {
         throw new FormError("Enter the advance payment date and method");
       }
+      const products = orderProductInputs(payload);
+      if (products.some((item) => !item.name || !item.quantity || !item.price)) {
+        throw new FormError("Complete the product name, quantity and price for every product");
+      }
+      const firstProduct = products[0];
       const row: Order = {
         id: crypto.randomUUID(),
         orderNo: clean(payload.orderNo) || `ORD-${Date.now().toString().slice(-6)}`,
@@ -481,8 +505,8 @@ export async function POST(request: Request, context: RequestContext = { userRol
         pickupFromGodown,
         contactPerson: clean(payload.contactPerson),
         contactPhone: clean(payload.contactPhone),
-        productName: clean(payload.productName),
-        productPrice: money(payload.productPrice),
+        productName: firstProduct?.name ?? "",
+        productPrice: firstProduct?.price ?? 0,
         attachmentKey: clean(payload.attachmentKey),
         attachmentName: clean(payload.attachmentName),
         attachmentType: clean(payload.attachmentType),
@@ -495,6 +519,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
       const uniqueVendorIds = [...new Set(assignments.map((item) => item.vendorId))];
       const validVendorCount = uniqueVendorIds.length ? await collections.vendors.countDocuments({ id: { $in: uniqueVendorIds } }) : 0;
       if (validVendorCount !== uniqueVendorIds.length) throw new FormError("Select valid vendors for the order");
+      const productRows: OrderProduct[] = products.map((product) => ({ id: crypto.randomUUID(), orderId: row.id, ...product, amount: product.quantity * product.price, createdAt }));
       const assignmentRows = assignments.map((assignment) => ({ id: crypto.randomUUID(), orderId: row.id, productId: "", productType: "Quantity-wise" as const, pricingBasis: "Per event" as const, unitRate: assignment.amount, quantity: 1, measurement: 1, rentalDays: 1, ...assignment, createdAt }));
       const advanceRow: Payment | null = advancePayment ? {
         id: crypto.randomUUID(),
@@ -516,6 +541,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
       try {
         await session.withTransaction(async () => {
           await collections.orders.insertOne(row, { session });
+          if (productRows.length) await collections.orderProducts.insertMany(productRows, { session });
           if (assignmentRows.length) await collections.orderVendors.insertMany(assignmentRows, { session });
           if (advanceRow) await collections.payments.insertOne(advanceRow, { session });
         });
@@ -638,15 +664,24 @@ export async function POST(request: Request, context: RequestContext = { userRol
         return Response.json({ error: "Enter a valid expense date" }, { status: 400 });
       }
       const orderId = clean(payload.orderId);
+      const category = clean(payload.category);
+      if (!isAllowedExpenseCategory(category)) {
+        return Response.json({ error: "Select a valid expense category" }, { status: 400 });
+      }
       let personId = clean(payload.personId);
       if (userRole === "supervisor") {
         const supervisorPerson = await findSupervisorPerson(collections, context);
         if (!supervisorPerson) throw new FormError("Supervisor profile is not linked to a Person record");
+        if (personId && personId !== supervisorPerson.id) {
+          throw new FormError("Supervisor expenses are assigned to your linked Person record");
+        }
+        if (clean(payload.vendorId) || clean(payload.vendor)) {
+          throw new FormError("Vendor or payee cannot be recorded on an expense");
+        }
         const ownedOrder = await collections.orders.findOne({ id: orderId, assignedPersonId: supervisorPerson.id, status: { $nin: ["Completed", "Cancelled"] } });
         if (!ownedOrder) throw new FormError("Supervisor actions require an active assigned order");
         personId = supervisorPerson.id;
       }
-      const vendorId = clean(payload.vendorId);
       const [order, person] = await Promise.all([
         findById(collections.orders, orderId),
         findById(collections.persons, personId),
@@ -655,7 +690,9 @@ export async function POST(request: Request, context: RequestContext = { userRol
       if (!person) {
         return Response.json({ error: "Select a valid responsible person" }, { status: 400 });
       }
-      if (vendorId && !await findById(collections.vendors, vendorId)) throw new FormError("Select a valid vendor");
+      if (userRole !== "supervisor" && !isExpenseResponsiblePerson(person, order)) {
+        throw new FormError("Responsible person must be an active salesperson, this order's assigned supervisor, or an active manager");
+      }
       const amount = money(payload.amount);
       if (!amount) {
         return Response.json({ error: "Expense amount must be greater than zero" }, { status: 400 });
@@ -665,9 +702,9 @@ export async function POST(request: Request, context: RequestContext = { userRol
         expenseNo: clean(payload.expenseNo) || `EXP-${Date.now().toString().slice(-6)}`,
         orderId,
         personId,
-        category: clean(payload.category),
-        vendor: clean(payload.vendor),
-        vendorId,
+        category,
+        vendor: "",
+        vendorId: "",
         description: clean(payload.description),
         expenseDate: clean(payload.expenseDate),
         amount,
@@ -765,7 +802,7 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       return Response.json({ error: "Your role cannot edit vendor products" }, { status: 403 });
     }
 
-    const { collections } = await getMongoDatabase();
+    const { client, collections } = await getMongoDatabase();
 
     if (type === "vendorProduct") {
       const missing = required(payload, ["vendorId", "name", "productType", "pricingBasis", "rentalCharge"]);
@@ -887,6 +924,11 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
     if (!isOrderTeamPerson(assignedPerson, "supervisor", context.teamAssignments)) throw new FormError("Select a valid supervisor from the team");
     const contractValue = money(payload.contractValue);
     if (!contractValue) throw new FormError("Order value must be greater than zero");
+    const products = orderProductInputs(payload);
+    if (products.some((item) => !item.name || !item.quantity || !item.price)) {
+      throw new FormError("Complete the product name, quantity and price for every product");
+    }
+    const firstProduct = products[0];
 
     const updates = {
       orderNo: clean(payload.orderNo),
@@ -905,15 +947,25 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       pickupFromGodown,
       contactPerson: clean(payload.contactPerson),
       contactPhone: clean(payload.contactPhone),
-      productName: clean(payload.productName),
-      productPrice: money(payload.productPrice),
+      productName: firstProduct?.name ?? "",
+      productPrice: firstProduct?.price ?? 0,
       attachmentKey: clean(payload.attachmentKey) || existingOrder.attachmentKey,
       attachmentName: clean(payload.attachmentName) || existingOrder.attachmentName,
       attachmentType: clean(payload.attachmentType) || existingOrder.attachmentType,
       status: clean(payload.status) || "Planned",
       contractValue,
     };
-    await collections.orders.updateOne({ id }, { $set: updates });
+    const productRows: OrderProduct[] = products.map((product) => ({ id: crypto.randomUUID(), orderId: id, ...product, amount: product.quantity * product.price, createdAt: now() }));
+    const session = client.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await collections.orders.updateOne({ id }, { $set: updates }, { session });
+        await collections.orderProducts.deleteMany({ orderId: id }, { session });
+        if (productRows.length) await collections.orderProducts.insertMany(productRows, { session });
+      });
+    } finally {
+      await session.endSession();
+    }
     return Response.json({ record: { ...existingOrder, ...updates } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update record";

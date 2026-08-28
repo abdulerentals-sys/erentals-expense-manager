@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import ts from "typescript";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
+
+async function loadPermissions() {
+  const source = await read("app/auth/permissions.ts");
+  const output = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  return import(`data:text/javascript;base64,${Buffer.from(output).toString("base64")}`);
+}
 
 test("supervisor workspace is ownership-scoped and has read-only history", async () => {
   const [permissions, dashboard, route] = await Promise.all([
@@ -16,6 +25,35 @@ test("supervisor workspace is ownership-scoped and has read-only history", async
   assert.match(dashboard, /href: "\/history"/);
   assert.match(dashboard, /function SupervisorHistoryPage/);
   assert.match(route, /filterRecordData\(data, user\.role, user\.personId, user\.email\)/);
+});
+
+test("supervisor records never expose legacy invoices or their attachment keys", async () => {
+  const { filterRecordData } = await loadPermissions();
+  const invoice = {
+    id: "invoice-1",
+    orderId: "order-1",
+    total: 250000,
+    attachmentKey: "documents/legacy/private-invoice.pdf",
+  };
+  const data = {
+    customers: [],
+    persons: [{ id: "supervisor-1", email: "supervisor@example.com" }],
+    vendors: [],
+    vendorProducts: [],
+    orders: [{ id: "order-1", assignedPersonId: "supervisor-1", status: "In progress", customerId: "customer-1" }],
+    orderProducts: [],
+    orderVendors: [],
+    invoices: [invoice],
+    expenses: [],
+    payments: [],
+  };
+
+  const supervisorData = filterRecordData(data, "supervisor", "supervisor-1", "supervisor@example.com");
+  assert.deepEqual(supervisorData.invoices, []);
+  assert.equal(JSON.stringify(supervisorData).includes(invoice.attachmentKey), false);
+
+  assert.strictEqual(filterRecordData(data, "admin"), data);
+  assert.strictEqual(filterRecordData(data, "accountant"), data);
 });
 
 test("supervisors can assign catalog products without viewing or overriding prices", async () => {
