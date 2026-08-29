@@ -11,9 +11,10 @@ export type DashboardSection =
   | "payments"
   | "reports"
   | "history"
+  | "settings"
   | "users";
 
-export type RecordType = "customer" | "person" | "vendor" | "vendorProduct" | "order" | "orderVendor" | "expense" | "payment";
+export type RecordType = "customer" | "person" | "vendor" | "vendorProduct" | "order" | "orderVendor" | "expense" | "expenseCategory" | "payment";
 export type PaymentDirection = "Received" | "Paid";
 
 export const roleLabels: Record<UserRole, string> = {
@@ -31,14 +32,14 @@ export const roleDescriptions: Record<UserRole, string> = {
 };
 
 const sectionsByRole: Record<UserRole, DashboardSection[]> = {
-  admin: ["overview", "customers", "persons", "vendors", "orders", "expenses", "payments", "reports", "users"],
+  admin: ["overview", "customers", "persons", "vendors", "orders", "expenses", "payments", "reports", "settings", "users"],
   accountant: ["overview", "customers", "vendors", "orders", "expenses", "payments", "reports"],
   supervisor: ["overview", "customers", "persons", "orders", "expenses", "history"],
   sales: ["overview", "customers", "persons", "orders", "payments"],
 };
 
 const recordsByRole: Record<UserRole, RecordType[]> = {
-  admin: ["customer", "person", "vendor", "vendorProduct", "order", "orderVendor", "expense", "payment"],
+  admin: ["customer", "person", "vendor", "vendorProduct", "order", "orderVendor", "expense", "expenseCategory", "payment"],
   accountant: ["customer", "vendor", "vendorProduct", "orderVendor", "expense", "payment"],
   supervisor: ["person", "orderVendor", "expense"],
   sales: ["customer", "person", "order", "payment"],

@@ -28,6 +28,7 @@ test("expense categories are fixed and cannot be invented", async () => {
   ]);
   assert.equal(rules.isAllowedExpenseCategory("Transport"), true);
   assert.equal(rules.isAllowedExpenseCategory("Personal reimbursement"), false);
+  assert.equal(rules.isAllowedExpenseCategory("Personal reimbursement", ["Personal reimbursement"]), true);
 });
 
 test("expense responsibility is limited to active salespeople, the assigned supervisor, and active managers", async () => {

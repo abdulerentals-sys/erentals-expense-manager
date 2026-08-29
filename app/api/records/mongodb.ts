@@ -7,7 +7,7 @@ import {
 } from "mongodb";
 import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
-import { isAllowedExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
+import { expenseCategoryKey, isAllowedExpenseCategory, isBuiltInExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis, type ProductType } from "../../vendor-pricing";
 
 type Payload = Record<string, unknown>;
@@ -39,6 +39,7 @@ type Person = {
 
 type Vendor = { id: string; name: string; contactPerson: string; phone: string; email: string; gstin: string; address: string; paymentMode: string; status: string; createdAt: string };
 type VendorProduct = { id: string; vendorId: string; name: string; productType: ProductType; pricingBasis: PricingBasis; rentalCharge: number; status: string; createdAt: string };
+type ExpenseCategoryRecord = { id: string; name: string; nameKey: string; status: string; createdAt: string };
 
 type Order = {
   id: string;
@@ -135,6 +136,7 @@ type Collections = {
   orderVendors: Collection<OrderVendor>;
   invoices: Collection<Invoice>;
   expenses: Collection<Expense>;
+  expenseCategories: Collection<ExpenseCategoryRecord>;
   payments: Collection<Payment>;
 };
 
@@ -264,6 +266,7 @@ function getCollections(db: Db): Collections {
     orderVendors: db.collection<OrderVendor>("order_vendors"),
     invoices: db.collection<Invoice>("invoices"),
     expenses: db.collection<Expense>("expenses"),
+    expenseCategories: db.collection<ExpenseCategoryRecord>("expense_categories"),
     payments: db.collection<Payment>("payments"),
   };
 }
@@ -287,6 +290,7 @@ function ensureMongoIndexes(collections: Collections) {
       collections.expenses.createIndex({ expenseNo: 1 }, { unique: true }),
       collections.expenses.createIndex({ orderId: 1 }),
       collections.expenses.createIndex({ expenseDate: -1 }),
+      collections.expenseCategories.createIndex({ nameKey: 1 }, { unique: true }),
       collections.payments.createIndex({ customerId: 1 }),
       collections.payments.createIndex({ orderId: 1 }),
       collections.payments.createIndex({ personId: 1 }),
@@ -332,7 +336,7 @@ export async function GET() {
   try {
     const { collections } = await getMongoDatabase();
     const options = { projection: { _id: 0 } };
-    const [customers, persons, vendors, vendorProducts, orders, orderProducts, orderVendors, invoices, expenses, payments] = await Promise.all([
+    const [customers, persons, vendors, vendorProducts, orders, orderProducts, orderVendors, invoices, expenses, expenseCategories, payments] = await Promise.all([
       collections.customers.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.persons.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.vendors.find({}, options).sort({ createdAt: -1 }).toArray(),
@@ -342,6 +346,7 @@ export async function GET() {
       collections.orderVendors.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.invoices.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.expenses.find({}, options).sort({ createdAt: -1 }).toArray(),
+      collections.expenseCategories.find({ status: "Active" }, options).sort({ name: 1 }).toArray(),
       collections.payments.find({}, options).sort({ createdAt: -1 }).toArray(),
     ]);
     const orderByInvoice = new Map(invoices.map((invoice) => [invoice.id, invoice.orderId]));
@@ -369,7 +374,7 @@ export async function GET() {
       attachmentName: order.attachmentName || "",
       attachmentType: order.attachmentType || "",
     }));
-    return Response.json({ customers, persons, vendors, vendorProducts, orders: normalizedOrders, orderProducts, orderVendors, invoices, expenses, payments: normalizedPayments });
+    return Response.json({ customers, persons, vendors, vendorProducts, orders: normalizedOrders, orderProducts, orderVendors, invoices, expenses, expenseCategories, payments: normalizedPayments });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Unable to load records" },
@@ -452,6 +457,23 @@ export async function POST(request: Request, context: RequestContext = { userRol
       if (!rentalCharge) throw new FormError("Rental charge must be greater than zero");
       const row: VendorProduct = { id: crypto.randomUUID(), vendorId, name: clean(payload.name), productType, pricingBasis: pricingBasis as PricingBasis, rentalCharge, status: "Active", createdAt };
       await collections.vendorProducts.insertOne(row);
+      return Response.json({ record: row }, { status: 201 });
+    }
+
+    if (type === "expenseCategory") {
+      const name = clean(payload.name).replace(/\s+/g, " ");
+      if (!name) throw new FormError("Category name is required");
+      if (name.length > 60) throw new FormError("Category name must be 60 characters or fewer");
+      if (isBuiltInExpenseCategory(name)) throw new FormError("That built-in category already exists");
+      const nameKey = expenseCategoryKey(name);
+      const existing = await collections.expenseCategories.findOne({ nameKey }, { projection: { _id: 0 } });
+      if (existing?.status === "Active") throw new FormError("That category already exists");
+      if (existing) {
+        await collections.expenseCategories.updateOne({ id: existing.id }, { $set: { name, status: "Active" } });
+        return Response.json({ record: { ...existing, name, status: "Active" } }, { status: 201 });
+      }
+      const row: ExpenseCategoryRecord = { id: crypto.randomUUID(), name, nameKey, status: "Active", createdAt };
+      await collections.expenseCategories.insertOne(row);
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -673,7 +695,8 @@ export async function POST(request: Request, context: RequestContext = { userRol
       }
       const orderId = clean(payload.orderId);
       const category = clean(payload.category);
-      if (!isAllowedExpenseCategory(category)) {
+      const customCategories = await collections.expenseCategories.find({ status: "Active" }, { projection: { _id: 0, name: 1 } }).toArray();
+      if (!isAllowedExpenseCategory(category, customCategories.map((item) => item.name))) {
         return Response.json({ error: "Select a valid expense category" }, { status: 400 });
       }
       let personId = clean(payload.personId);
@@ -1005,11 +1028,19 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
 
 export async function DELETE(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userName: "", userEmail: "" }) {
   try {
-    if (!["admin", "accountant"].includes(context.userRole)) return Response.json({ error: "Your role cannot delete vendor products" }, { status: 403 });
     const body = (await request.json()) as { type?: string; id?: string };
+    const type = clean(body.type);
     const id = clean(body.id);
-    if (clean(body.type) !== "vendorProduct" || !id) return Response.json({ error: "Select a valid vendor product" }, { status: 400 });
+    if (!id || !["vendorProduct", "expenseCategory"].includes(type)) return Response.json({ error: "Select a valid record to delete" }, { status: 400 });
+    if (type === "vendorProduct" && !["admin", "accountant"].includes(context.userRole)) return Response.json({ error: "Your role cannot delete vendor products" }, { status: 403 });
+    if (type === "expenseCategory" && context.userRole !== "admin") return Response.json({ error: "Only administrators can delete expense categories" }, { status: 403 });
     const { collections } = await getMongoDatabase();
+    if (type === "expenseCategory") {
+      const category = await collections.expenseCategories.findOne({ id, status: "Active" }, { projection: { _id: 0 } });
+      if (!category) return Response.json({ error: "Expense category not found" }, { status: 404 });
+      await collections.expenseCategories.updateOne({ id }, { $set: { status: "Deleted" } });
+      return Response.json({ record: { ...category, status: "Deleted" } });
+    }
     const product = await collections.vendorProducts.findOne({ id, status: { $ne: "Deleted" } }, { projection: { _id: 0 } });
     if (!product) return Response.json({ error: "Vendor product not found" }, { status: 404 });
     const updates = { name: `${product.name} [deleted ${id.slice(0, 8)}]`, status: "Deleted" };

@@ -22,6 +22,8 @@ export function ensureSchema() {
       d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS invoices_invoice_no_unique ON invoices (invoice_no)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS expenses (id text PRIMARY KEY NOT NULL, expense_no text NOT NULL, order_id text NOT NULL, person_id text NOT NULL, vendor_id text DEFAULT '' NOT NULL, category text NOT NULL, vendor text NOT NULL, description text NOT NULL, expense_date text NOT NULL, amount integer NOT NULL, payment_mode text NOT NULL, receipt_key text DEFAULT '' NOT NULL, receipt_name text DEFAULT '' NOT NULL, created_at text NOT NULL)"),
       d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS expenses_expense_no_unique ON expenses (expense_no)"),
+      d1.prepare("CREATE TABLE IF NOT EXISTS expense_categories (id text PRIMARY KEY NOT NULL, name text NOT NULL, name_key text NOT NULL, status text DEFAULT 'Active' NOT NULL, created_at text NOT NULL)"),
+      d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS expense_categories_name_key_unique ON expense_categories (name_key)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS payments (id text PRIMARY KEY NOT NULL, order_id text DEFAULT '' NOT NULL, manual_order_id text DEFAULT '' NOT NULL, person_id text DEFAULT '' NOT NULL, vendor_id text DEFAULT '' NOT NULL, invoice_id text DEFAULT '' NOT NULL, customer_id text DEFAULT '' NOT NULL, direction text NOT NULL, amount integer NOT NULL, payment_date text NOT NULL, method text NOT NULL, reference text DEFAULT '' NOT NULL, notes text DEFAULT '' NOT NULL, created_at text NOT NULL)"),
     ]);
 

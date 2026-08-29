@@ -153,6 +153,14 @@ export const expenses = sqliteTable("expenses", {
   createdAt: text("created_at").notNull(),
 });
 
+export const expenseCategories = sqliteTable("expense_categories", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  nameKey: text("name_key").notNull().unique(),
+  status: text("status").notNull().default("Active"),
+  createdAt: text("created_at").notNull(),
+});
+
 export const payments = sqliteTable("payments", {
   id: text("id").primaryKey(),
   orderId: text("order_id").notNull().default(""),

@@ -14,7 +14,7 @@ test("expense entry follows role-specific responsibility rules without vendor pa
   assert.match(expenseForm, /expenseOrderId/);
   assert.doesNotMatch(expenseForm, /Vendor \/ payee/);
   assert.doesNotMatch(expenseForm, /name="vendorId"/);
-  assert.match(expenseForm, /EXPENSE_CATEGORIES\.map/);
+  assert.match(expenseForm, /availableExpenseCategories\.map/);
 });
 
 test("expense dashboard supports period and order analysis with financial detail", async () => {

@@ -10,7 +10,7 @@ import type { PublicUser } from "../auth/types";
 import { isSupportedOrderDocument, isSupportedReceiptDocument } from "../upload-types";
 import { EXPENSE_CATEGORIES, isExpenseResponsiblePerson } from "../expense-rules";
 import { calculateTentativeCost, isProductType, measurementLabel, productTypes, type PricingBasis, type ProductType } from "../vendor-pricing";
-import { adminDateRange, indiaDateKey, shiftDateKey, summarizeAdminOrders, type AdminPeriod } from "../admin-analytics";
+import { adminDateRange, dateIsInRange, indiaDateKey, shiftDateKey, summarizeAdminOrders, type AdminPeriod } from "../admin-analytics";
 
 type Customer = { id: string; name: string; businessName: string; phone: string; email: string; gstin: string; address: string; openingBalance: number; createdAt: string };
 type Person = { id: string; name: string; role: string; phone: string; email: string; paymentMode: string; status: string; orderId: string; createdAt: string };
@@ -22,11 +22,14 @@ type OrderProductDraft = { key: string; name: string; quantity: number; price: n
 type OrderVendor = { id: string; orderId: string; vendorId: string; productId: string; productName: string; productType: ProductType; pricingBasis: PricingBasis; unitRate: number; quantity: number; measurement: number; rentalDays: number; amount: number; notes: string; createdAt: string };
 type OrderVendorDraft = { key: string; vendorId: string; productName: string; amount: number; notes: string };
 type Expense = { id: string; expenseNo: string; orderId: string; personId: string; vendorId: string; category: string; vendor: string; description: string; expenseDate: string; amount: number; paymentMode: string; receiptKey: string; receiptName: string; createdAt: string };
+type ExpenseCategoryRecord = { id: string; name: string; status: string; createdAt: string };
 type Payment = { id: string; orderId: string; manualOrderId: string; personId: string; vendorId: string; customerId: string; direction: string; amount: number; paymentDate: string; method: string; reference: string; notes: string; createdAt: string };
-type AppData = { customers: Customer[]; historyCustomers: Customer[]; persons: Person[]; vendors: Vendor[]; vendorProducts: VendorProduct[]; orders: Order[]; historyOrders: Order[]; orderProducts: OrderProduct[]; orderVendors: OrderVendor[]; expenses: Expense[]; payments: Payment[]; supervisorLinked?: boolean; currentPersonId?: string };
+type AdminDetailItem = { id: string; date: string; title: string; meta: string; detail: string; amount?: number; status?: string };
+type AdminReportDetail = { eyebrow: string; title: string; description: string; summary: Array<{ label: string; value: string }>; items: AdminDetailItem[] };
+type AppData = { customers: Customer[]; historyCustomers: Customer[]; persons: Person[]; vendors: Vendor[]; vendorProducts: VendorProduct[]; orders: Order[]; historyOrders: Order[]; orderProducts: OrderProduct[]; orderVendors: OrderVendor[]; expenses: Expense[]; expenseCategories: ExpenseCategoryRecord[]; payments: Payment[]; supervisorLinked?: boolean; currentPersonId?: string };
 type ModalKind = "customer" | "person" | "vendor" | "vendorProduct" | "order" | "orderVendor" | "expense" | "payment" | null;
 
-const emptyData: AppData = { customers: [], historyCustomers: [], persons: [], vendors: [], vendorProducts: [], orders: [], historyOrders: [], orderProducts: [], orderVendors: [], expenses: [], payments: [] };
+const emptyData: AppData = { customers: [], historyCustomers: [], persons: [], vendors: [], vendorProducts: [], orders: [], historyOrders: [], orderProducts: [], orderVendors: [], expenses: [], expenseCategories: [], payments: [] };
 const navItems = [
   { key: "overview", label: "Overview", icon: "⌂", href: "/" },
   { key: "customers", label: "Customers", icon: "◎", href: "/customers" },
@@ -37,6 +40,7 @@ const navItems = [
   { key: "payments", label: "Payments", icon: "₹", href: "/payments" },
   { key: "reports", label: "Reports", icon: "▥", href: "/reports" },
   { key: "history", label: "Order history", icon: "◷", href: "/history" },
+  { key: "settings", label: "Settings", icon: "⚙", href: "/settings" },
   { key: "users", label: "Team access", icon: "♙", href: "/users" },
 ];
 const titles: Record<string, { title: string; eyebrow: string }> = {
@@ -49,6 +53,7 @@ const titles: Record<string, { title: string; eyebrow: string }> = {
   payments: { title: "Payments", eyebrow: "Money received and money paid" },
   reports: { title: "Reports", eyebrow: "Revenue, cost and profitability" },
   history: { title: "Order history", eyebrow: "Read-only record of all your assigned orders" },
+  settings: { title: "Settings", eyebrow: "Manage expense categories and workspace options" },
 };
 const modalTitles: Record<Exclude<ModalKind, null>, string> = {
   customer: "Create customer profile", person: "Add team member", vendor: "Add vendor record", vendorProduct: "Add vendor product", order: "Create a new order", orderVendor: "Assign vendor to order", expense: "Add order expense", payment: "Record payment",
@@ -94,6 +99,8 @@ export default function ExpenseDashboard({ initialSection, user }: { initialSect
   const [editingPayment, setEditingPayment] = useState<Payment | null>(null);
   const [editingVendorProduct, setEditingVendorProduct] = useState<VendorProduct | null>(null);
   const [deletingProductId, setDeletingProductId] = useState("");
+  const [savingCategory, setSavingCategory] = useState(false);
+  const [deletingCategoryId, setDeletingCategoryId] = useState("");
   const [search, setSearch] = useState("");
   const [mobileMenu, setMobileMenu] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -185,6 +192,32 @@ export default function ExpenseDashboard({ initialSection, user }: { initialSect
     finally { setDeletingProductId(""); }
   };
 
+  const addExpenseCategory = async (name: string) => {
+    setSavingCategory(true);
+    try {
+      const response = await fetch("/api/records", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "expenseCategory", payload: { name } }) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Unable to add expense category");
+      setToast("Expense category added successfully");
+      await loadData();
+      return true;
+    } catch (error) { setToast(error instanceof Error ? error.message : "Unable to add expense category"); return false; }
+    finally { setSavingCategory(false); }
+  };
+
+  const deleteExpenseCategory = async (category: ExpenseCategoryRecord) => {
+    if (!window.confirm(`Delete ${category.name} from future expense forms? Existing expense history will be preserved.`)) return;
+    setDeletingCategoryId(category.id);
+    try {
+      const response = await fetch("/api/records", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "expenseCategory", id: category.id }) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Unable to delete expense category");
+      setToast("Expense category removed from future forms");
+      await loadData();
+    } catch (error) { setToast(error instanceof Error ? error.message : "Unable to delete expense category"); }
+    finally { setDeletingCategoryId(""); }
+  };
+
   const uploadDocument = async () => {
     if (!file) return null;
     const allowed = modal === "order" ? isSupportedOrderDocument(file.type) : isSupportedReceiptDocument(file.type);
@@ -251,6 +284,7 @@ export default function ExpenseDashboard({ initialSection, user }: { initialSect
         {initialSection === "payments" && <PaymentsPage payments={data.payments} customerById={customerById} orderById={orderById} vendorById={vendorById} openModal={openModal} editPayment={editPayment} />}
         {initialSection === "reports" && <ReportsPage data={data} totals={totals} exportExpenses={exportExpenses} />}
         {initialSection === "history" && <SupervisorHistoryPage orders={data.historyOrders} customers={data.historyCustomers} />}
+        {initialSection === "settings" && <SettingsPage customCategories={data.expenseCategories} saving={savingCategory} deletingId={deletingCategoryId} onAdd={addExpenseCategory} onDelete={(category) => void deleteExpenseCategory(category)} />}
       </>}</div>
     </main>
     {mobileMenu && <button className="menu-backdrop" onClick={() => setMobileMenu(false)} aria-label="Close navigation" />}
@@ -317,11 +351,15 @@ function AdminOperationsDashboard({ data, customerById }: { data: AppData; custo
   const [period, setPeriod] = useState<AdminPeriod>("today");
   const [customFrom, setCustomFrom] = useState(todayKey);
   const [customTo, setCustomTo] = useState(todayKey);
+  const [detail, setDetail] = useState<AdminReportDetail | null>(null);
   const range = useMemo(() => adminDateRange(period, todayKey, customFrom, customTo), [period, todayKey, customFrom, customTo]);
   const analytics = useMemo(() => summarizeAdminOrders(data.orders, range), [data.orders, range]);
   const todayDeliveries = useMemo(() => summarizeAdminOrders(data.orders, adminDateRange("today", todayKey)).deliveries, [data.orders, todayKey]);
   const tomorrowDeliveries = useMemo(() => summarizeAdminOrders(data.orders, { from: tomorrowKey, to: tomorrowKey, label: "Tomorrow" }).deliveries, [data.orders, tomorrowKey]);
+  const todayPickups = useMemo(() => summarizeAdminOrders(data.orders, adminDateRange("today", todayKey)).pickups, [data.orders, todayKey]);
+  const tomorrowPickups = useMemo(() => summarizeAdminOrders(data.orders, { from: tomorrowKey, to: tomorrowKey, label: "Tomorrow" }).pickups, [data.orders, tomorrowKey]);
   const eligibleSalespeople = useMemo(() => data.persons.filter((person) => isOrderTeamPerson(person, "salesperson")), [data.persons]);
+  const eligibleSupervisors = useMemo(() => data.persons.filter((person) => isOrderTeamPerson(person, "supervisor")), [data.persons]);
   const salespersonRows = useMemo(() => {
     const rows = new Map<string, { id: string; name: string; orderCount: number; salesAmount: number }>();
     eligibleSalespeople.forEach((person) => rows.set(person.id, { id: person.id, name: person.name, orderCount: 0, salesAmount: 0 }));
@@ -335,24 +373,80 @@ function AdminOperationsDashboard({ data, customerById }: { data: AppData; custo
     });
     return [...rows.values()].sort((a, b) => b.salesAmount - a.salesAmount || b.orderCount - a.orderCount || a.name.localeCompare(b.name));
   }, [analytics.newOrders, data.persons, eligibleSalespeople]);
+  const supervisorRows = useMemo(() => eligibleSupervisors.map((person) => {
+    const orders = data.orders.filter((order) => order.assignedPersonId === person.id && dateIsInRange(indiaDateKey(order.createdAt), range));
+    const expenses = data.expenses.filter((expense) => expense.personId === person.id && dateIsInRange(expense.expenseDate, range));
+    const payments = data.payments.filter((payment) => payment.personId === person.id && dateIsInRange(payment.paymentDate, range));
+    return { person, orders, expenses, payments, activityCount: orders.length + expenses.length + payments.length, expenseAmount: expenses.reduce((sum, expense) => sum + expense.amount, 0) };
+  }).sort((a, b) => b.activityCount - a.activityCount || b.expenseAmount - a.expenseAmount || a.person.name.localeCompare(b.person.name)), [data.expenses, data.orders, data.payments, eligibleSupervisors, range]);
   const maxSales = Math.max(1, ...salespersonRows.map((row) => row.salesAmount));
   const rangeLabel = range.from === range.to ? shortDate(range.from) : `${shortDate(range.from)} – ${shortDate(range.to)}`;
   const periodOptions: Array<[AdminPeriod, string]> = [["today", "Today"], ["week", "This week"], ["month", "This month"], ["nextMonth", "Next month"], ["custom", "Custom"]];
 
+  useEffect(() => {
+    if (!detail) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [detail]);
+
+  const scheduleDetail = (title: string, orders: Order[], kind: "delivery" | "pickup", label: string): AdminReportDetail => ({
+    eyebrow: `${label} · ${kind === "delivery" ? "Delivery plan" : "Pickup plan"}`,
+    title,
+    description: `${orders.length} ${kind === "delivery" ? "delivery" : "pickup"}${orders.length === 1 ? "" : "s"} scheduled. Customer, team, time and venue details are shown below.`,
+    summary: [{ label: "Scheduled", value: String(orders.length) }, { label: "Order value", value: fmt(orders.reduce((sum, order) => sum + order.contractValue, 0)) }],
+    items: orders.map((order) => {
+      const date = kind === "delivery" ? order.deliveryDate : order.pickupDate;
+      const time = kind === "delivery" ? order.deliveryTime : order.pickupTime;
+      const address = kind === "pickup" && order.pickupFromGodown ? "eRentals godown" : kind === "pickup" ? order.pickupAddress || order.venue : order.deliveryAddress || order.venue;
+      const salesperson = data.persons.find((person) => person.id === order.salespersonId);
+      const supervisor = data.persons.find((person) => person.id === order.assignedPersonId);
+      return { id: order.id, date, title: customerDisplayName(customerById(order.customerId)), meta: `${order.orderNo} · ${time || "Time not added"}`, detail: [address || "Venue not added", salesperson?.name, supervisor?.name].filter(Boolean).join(" · "), amount: order.contractValue, status: order.status };
+    }),
+  });
+
+  const openSalesperson = (row: { id: string; name: string; orderCount: number; salesAmount: number }) => {
+    const orders = analytics.newOrders.filter((order) => (order.salespersonId || "unassigned") === row.id);
+    setDetail({ eyebrow: `${range.label} · Salesperson report`, title: row.name, description: `All new sales assigned to ${row.name} within ${rangeLabel}.`, summary: [{ label: "New orders", value: String(orders.length) }, { label: "Sales booked", value: fmt(row.salesAmount) }], items: orders.map((order) => ({ id: order.id, date: indiaDateKey(order.createdAt), title: customerDisplayName(customerById(order.customerId)), meta: `${order.orderNo} · ${orderDisplayTitle(order)}`, detail: `Delivery ${shortDate(order.deliveryDate)} · Pickup ${shortDate(order.pickupDate)}`, amount: order.contractValue, status: order.status })) });
+  };
+
+  const openSupervisor = (row: (typeof supervisorRows)[number]) => {
+    const items: AdminDetailItem[] = [
+      ...row.orders.map((order) => ({ id: `order-${order.id}`, date: indiaDateKey(order.createdAt), title: customerDisplayName(customerById(order.customerId)), meta: `Assigned order · ${order.orderNo}`, detail: `${orderDisplayTitle(order)} · ${shortDate(order.eventDate)}`, amount: order.contractValue, status: order.status })),
+      ...row.expenses.map((expense) => ({ id: `expense-${expense.id}`, date: expense.expenseDate, title: expense.description || expense.category, meta: `Expense · ${expense.expenseNo}`, detail: `${data.orders.find((order) => order.id === expense.orderId)?.orderNo || "Order"} · ${expense.category}`, amount: -expense.amount })),
+      ...row.payments.map((payment) => ({ id: `payment-${payment.id}`, date: payment.paymentDate, title: payment.notes || `${payment.direction} payment`, meta: `${payment.direction} · ${payment.method}`, detail: data.orders.find((order) => order.id === payment.orderId)?.orderNo || payment.manualOrderId || "Payment record", amount: payment.direction === "Received" ? payment.amount : -payment.amount })),
+    ].sort((a, b) => b.date.localeCompare(a.date));
+    setDetail({ eyebrow: `${range.label} · Supervisor activity`, title: row.person.name, description: `Orders, expenses and payment entries attributed to ${row.person.name} within ${rangeLabel}.`, summary: [{ label: "Transactions", value: String(items.length) }, { label: "Assigned orders", value: String(row.orders.length) }, { label: "Expenses", value: fmt(row.expenseAmount) }], items });
+  };
+
   return <section className="admin-operations" aria-label="Admin sales and operations dashboard">
-    <div className="admin-operations-hero"><div><span className="overline">Admin operations centre</span><h2>Sales and movement planner</h2><p>Track new business, salesperson performance, deliveries and pickups from one date-controlled view.</p><div className="admin-day-alerts"><span><strong>{todayDeliveries.length}</strong> deliveries today</span><span><strong>{tomorrowDeliveries.length}</strong> deliveries tomorrow</span><span><strong>{summarizeAdminOrders(data.orders, adminDateRange("today", todayKey)).pickups.length}</strong> pickups today</span></div></div><div className="admin-period-control"><span>Reporting period</span><div className="admin-period-tabs" role="group" aria-label="Admin dashboard period">{periodOptions.map(([value, label]) => <button type="button" key={value} className={period === value ? "active" : ""} aria-pressed={period === value} onClick={() => setPeriod(value)}>{label}</button>)}</div>{period === "custom" && <div className="admin-custom-dates"><label><span>From</span><input type="date" value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} /></label><label><span>To</span><input type="date" value={customTo} onChange={(event) => setCustomTo(event.target.value)} /></label></div>}<small>{range.label} · {rangeLabel}</small></div></div>
-    <div className="admin-kpi-grid"><AdminKpi label="New orders" value={String(analytics.newOrders.length)} detail={`Created in ${range.label.toLowerCase()}`} icon="◇" /><AdminKpi label="Sales booked" value={fmt(analytics.salesAmount)} detail="Confirmed order value" icon="₹" /><AdminKpi label="Deliveries" value={String(analytics.deliveries.length)} detail={`Scheduled for ${range.label.toLowerCase()}`} icon="↓" /><AdminKpi label="Pickups" value={String(analytics.pickups.length)} detail={`Scheduled for ${range.label.toLowerCase()}`} icon="↑" /></div>
-    <div className="admin-spotlight-grid"><AdminSchedulePanel title="Today’s deliveries" eyebrow={shortDate(todayKey)} orders={todayDeliveries} kind="delivery" customerById={customerById} data={data} compact /><AdminSchedulePanel title="Tomorrow’s deliveries" eyebrow={shortDate(tomorrowKey)} orders={tomorrowDeliveries} kind="delivery" customerById={customerById} data={data} compact /></div>
-    <div className="admin-insight-grid"><article className="panel admin-sales-panel"><div className="panel-head"><div><span className="overline">Salesperson-wise sales</span><h3>Salesperson performance</h3></div><span className="admin-range-chip">{rangeLabel}</span></div><div className="admin-sales-list">{salespersonRows.map((row) => <div className="admin-sales-row" key={row.id}><span className="avatar tiny">{initials(row.name)}</span><div className="grow"><div><strong>{row.name}</strong><b>{fmt(row.salesAmount)}</b></div><span>{row.orderCount} new order{row.orderCount === 1 ? "" : "s"}</span><i><b style={{ width: `${row.salesAmount ? Math.max(4, (row.salesAmount / maxSales) * 100) : 0}%` }} /></i></div></div>)}{!salespersonRows.length && <div className="mini-empty">Add salespeople to People or Team access to compare performance.</div>}</div></article><AdminSchedulePanel title="Delivery schedule" eyebrow={`${analytics.deliveries.length} selected`} orders={analytics.deliveries} kind="delivery" customerById={customerById} data={data} /><AdminSchedulePanel title="Pickup schedule" eyebrow={`${analytics.pickups.length} selected`} orders={analytics.pickups} kind="pickup" customerById={customerById} data={data} /></div>
+    <div className="admin-operations-hero"><div><span className="overline">Admin operations centre</span><h2>Sales and movement planner</h2><p>Track new business, salesperson performance, deliveries and pickups from one date-controlled view.</p><div className="admin-day-alerts"><button type="button" onClick={() => setDetail(scheduleDetail("Today’s deliveries", todayDeliveries, "delivery", "Today"))}><strong>{todayDeliveries.length}</strong> deliveries today</button><button type="button" onClick={() => setDetail(scheduleDetail("Tomorrow’s deliveries", tomorrowDeliveries, "delivery", "Tomorrow"))}><strong>{tomorrowDeliveries.length}</strong> deliveries tomorrow</button><button type="button" onClick={() => setDetail(scheduleDetail("Today’s pickups", todayPickups, "pickup", "Today"))}><strong>{todayPickups.length}</strong> pickups today</button><button type="button" onClick={() => setDetail(scheduleDetail("Tomorrow’s pickups", tomorrowPickups, "pickup", "Tomorrow"))}><strong>{tomorrowPickups.length}</strong> pickups tomorrow</button></div></div><div className="admin-period-control"><span>Reporting period</span><div className="admin-period-tabs" role="group" aria-label="Admin dashboard period">{periodOptions.map(([value, label]) => <button type="button" key={value} className={period === value ? "active" : ""} aria-pressed={period === value} onClick={() => setPeriod(value)}>{label}</button>)}</div>{period === "custom" && <div className="admin-custom-dates"><label><span>From</span><input type="date" value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} /></label><label><span>To</span><input type="date" value={customTo} onChange={(event) => setCustomTo(event.target.value)} /></label></div>}<small>{range.label} · {rangeLabel}</small></div></div>
+    <div className="admin-kpi-grid"><AdminKpi label="New orders" value={String(analytics.newOrders.length)} detail={`Created in ${range.label.toLowerCase()}`} icon="◇" onClick={() => setDetail({ eyebrow: `${range.label} · Order report`, title: "New orders", description: `All orders created within ${rangeLabel}.`, summary: [{ label: "New orders", value: String(analytics.newOrders.length) }, { label: "Sales booked", value: fmt(analytics.salesAmount) }], items: analytics.newOrders.map((order) => ({ id: order.id, date: indiaDateKey(order.createdAt), title: customerDisplayName(customerById(order.customerId)), meta: `${order.orderNo} · ${orderDisplayTitle(order)}`, detail: `${data.persons.find((person) => person.id === order.salespersonId)?.name || "Unassigned salesperson"} · ${shortDate(order.eventDate)}`, amount: order.contractValue, status: order.status })) })} /><AdminKpi label="Sales booked" value={fmt(analytics.salesAmount)} detail="Confirmed order value" icon="₹" onClick={() => setDetail({ eyebrow: `${range.label} · Sales report`, title: "Sales booked", description: `Sales booked within ${rangeLabel}, grouped in the detailed order list below.`, summary: [{ label: "Orders", value: String(analytics.newOrders.length) }, { label: "Sales", value: fmt(analytics.salesAmount) }], items: analytics.newOrders.map((order) => ({ id: order.id, date: indiaDateKey(order.createdAt), title: customerDisplayName(customerById(order.customerId)), meta: `${order.orderNo} · ${data.persons.find((person) => person.id === order.salespersonId)?.name || "Unassigned salesperson"}`, detail: orderDisplayTitle(order), amount: order.contractValue, status: order.status })) })} /><AdminKpi label="Deliveries" value={String(analytics.deliveries.length)} detail={`Scheduled for ${range.label.toLowerCase()}`} icon="↓" onClick={() => setDetail(scheduleDetail("Delivery schedule", analytics.deliveries, "delivery", range.label))} /><AdminKpi label="Pickups" value={String(analytics.pickups.length)} detail={`Scheduled for ${range.label.toLowerCase()}`} icon="↑" onClick={() => setDetail(scheduleDetail("Pickup schedule", analytics.pickups, "pickup", range.label))} /></div>
+    <div className="admin-spotlight-grid"><AdminSchedulePanel title="Today’s deliveries" eyebrow={shortDate(todayKey)} orders={todayDeliveries} kind="delivery" customerById={customerById} data={data} compact onView={() => setDetail(scheduleDetail("Today’s deliveries", todayDeliveries, "delivery", "Today"))} /><AdminSchedulePanel title="Tomorrow’s deliveries" eyebrow={shortDate(tomorrowKey)} orders={tomorrowDeliveries} kind="delivery" customerById={customerById} data={data} compact onView={() => setDetail(scheduleDetail("Tomorrow’s deliveries", tomorrowDeliveries, "delivery", "Tomorrow"))} /></div>
+    <div className="admin-insight-grid"><article className="panel admin-sales-panel"><div className="panel-head"><div><span className="overline">Salesperson-wise sales</span><h3>Salesperson performance</h3></div><span className="admin-range-chip">{rangeLabel}</span></div><div className="admin-sales-list">{salespersonRows.map((row) => <button type="button" className="admin-sales-row" key={row.id} onClick={() => openSalesperson(row)}><span className="avatar tiny">{initials(row.name)}</span><span className="grow"><span><strong>{row.name}</strong><b>{fmt(row.salesAmount)}</b></span><small>{row.orderCount} new order{row.orderCount === 1 ? "" : "s"} · View sales</small><i><b style={{ width: `${row.salesAmount ? Math.max(4, (row.salesAmount / maxSales) * 100) : 0}%` }} /></i></span></button>)}{!salespersonRows.length && <div className="mini-empty">Add salespeople in People to compare performance.</div>}</div></article><article className="panel admin-sales-panel admin-supervisor-panel"><div className="panel-head"><div><span className="overline">Supervisor activity</span><h3>Supervisor transactions</h3></div><span className="admin-range-chip">{rangeLabel}</span></div><div className="admin-sales-list">{supervisorRows.map((row) => <button type="button" className="admin-sales-row" key={row.person.id} onClick={() => openSupervisor(row)}><span className="avatar tiny">{initials(row.person.name)}</span><span className="grow"><span><strong>{row.person.name}</strong><b>{row.activityCount}</b></span><small>{row.orders.length} orders · {row.expenses.length} expenses · View activity</small></span></button>)}{!supervisorRows.length && <div className="mini-empty">Add supervisors in People to review their activity.</div>}</div></article><AdminSchedulePanel title="Delivery schedule" eyebrow={`${analytics.deliveries.length} selected`} orders={analytics.deliveries} kind="delivery" customerById={customerById} data={data} onView={() => setDetail(scheduleDetail("Delivery schedule", analytics.deliveries, "delivery", range.label))} /><AdminSchedulePanel title="Pickup schedule" eyebrow={`${analytics.pickups.length} selected`} orders={analytics.pickups} kind="pickup" customerById={customerById} data={data} onView={() => setDetail(scheduleDetail("Pickup schedule", analytics.pickups, "pickup", range.label))} /></div>
+    {detail && <AdminReportDrawer detail={detail} onClose={() => setDetail(null)} />}
   </section>;
 }
 
-function AdminKpi({ label, value, detail, icon }: { label: string; value: string; detail: string; icon: string }) {
-  return <article><span>{icon}</span><div><small>{label}</small><strong>{value}</strong><p>{detail}</p></div></article>;
+function AdminKpi({ label, value, detail, icon, onClick }: { label: string; value: string; detail: string; icon: string; onClick: () => void }) {
+  return <button type="button" className="admin-kpi admin-clickable-stat" onClick={onClick} aria-label={`View ${label} details`}><span>{icon}</span><span><small>{label}</small><strong>{value}</strong><p>{detail}</p></span></button>;
 }
 
-function AdminSchedulePanel({ title, eyebrow, orders, kind, customerById, data, compact = false }: { title: string; eyebrow: string; orders: Order[]; kind: "delivery" | "pickup"; customerById: (id: string) => Customer | undefined; data: AppData; compact?: boolean }) {
-  return <article className={`panel admin-schedule-panel ${compact ? "compact" : ""}`}><div className="panel-head"><div><span className="overline">{eyebrow}</span><h3>{title}</h3></div><span className="schedule-count">{orders.length}</span></div><div className="admin-schedule-list">{orders.map((order) => { const date = kind === "delivery" ? order.deliveryDate : order.pickupDate; const time = kind === "delivery" ? order.deliveryTime : order.pickupTime; const salesperson = data.persons.find((person) => person.id === order.salespersonId); const location = order.pickupFromGodown ? "eRentals godown" : order.deliveryAddress || order.venue || "Venue not added"; return <div className="admin-schedule-row" key={`${kind}-${order.id}`}><div className="schedule-date"><strong>{shortDate(date)}</strong><span>{time || "Time not added"}</span></div><div className="grow"><strong>{customerDisplayName(customerById(order.customerId))}</strong><span>{order.orderNo} · {salesperson?.name || "Salesperson not assigned"}</span><small>⌖ {location}</small></div><Status value={order.status} /></div>; })}{!orders.length && <div className="mini-empty">No {kind === "delivery" ? "deliveries" : "pickups"} are scheduled for this date range.</div>}</div></article>;
+function AdminSchedulePanel({ title, eyebrow, orders, kind, customerById, data, compact = false, onView }: { title: string; eyebrow: string; orders: Order[]; kind: "delivery" | "pickup"; customerById: (id: string) => Customer | undefined; data: AppData; compact?: boolean; onView?: () => void }) {
+  return <article className={`panel admin-schedule-panel ${compact ? "compact" : ""}`}><div className="panel-head"><div><span className="overline">{eyebrow}</span><h3>{title}</h3></div><div className="schedule-panel-actions"><span className="schedule-count">{orders.length}</span>{onView && <button type="button" className="text-btn" onClick={onView}>View all →</button>}</div></div><div className="admin-schedule-list">{orders.map((order) => { const date = kind === "delivery" ? order.deliveryDate : order.pickupDate; const time = kind === "delivery" ? order.deliveryTime : order.pickupTime; const salesperson = data.persons.find((person) => person.id === order.salespersonId); const location = kind === "pickup" && order.pickupFromGodown ? "eRentals godown" : kind === "pickup" ? order.pickupAddress || order.venue || "Venue not added" : order.deliveryAddress || order.venue || "Venue not added"; return <div className="admin-schedule-row" key={`${kind}-${order.id}`}><div className="schedule-date"><strong>{shortDate(date)}</strong><span>{time || "Time not added"}</span></div><div className="grow"><strong>{customerDisplayName(customerById(order.customerId))}</strong><span>{order.orderNo} · {salesperson?.name || "Salesperson not assigned"}</span><small>⌖ {location}</small></div><Status value={order.status} /></div>; })}{!orders.length && <div className="mini-empty">No {kind === "delivery" ? "deliveries" : "pickups"} are scheduled for this date range.</div>}</div></article>;
+}
+
+function AdminReportDrawer({ detail, onClose }: { detail: AdminReportDetail; onClose: () => void }) {
+  return <div className="modal-backdrop admin-report-overlay" role="presentation"><aside className="customer-drawer transaction-drawer admin-insight-drawer" role="dialog" aria-modal="true" aria-label={detail.title}><button type="button" className="modal-close" onClick={onClose} aria-label="Close report details">×</button><div className="transaction-head"><span className="overline">{detail.eyebrow}</span><h2>{detail.title}</h2><p>{detail.description}</p></div><div className="admin-detail-summary">{detail.summary.map((item) => <div key={item.label}><span>{item.label}</span><strong>{item.value}</strong></div>)}</div><div className="drawer-section"><h3>Detailed records</h3><div className="transaction-list">{detail.items.map((item) => <div className="transaction-item admin-detail-item" key={item.id}><span className={`activity-icon ${(item.amount ?? 0) >= 0 ? "in" : "out"}`}>{(item.amount ?? 0) >= 0 ? "↓" : "↑"}</span><div className="grow"><strong>{item.title}</strong><span>{item.meta}</span><small>{item.detail} · {shortDate(item.date)}</small></div>{item.amount !== undefined && <strong className={item.amount >= 0 ? "positive" : "negative"}>{item.amount >= 0 ? "+" : "−"}{fmt(Math.abs(item.amount))}</strong>}{item.status && <Status value={item.status} />}</div>)}{!detail.items.length && <div className="mini-empty">No records match this reporting period.</div>}</div></div></aside></div>;
+}
+
+function SettingsPage({ customCategories, saving, deletingId, onAdd, onDelete }: { customCategories: ExpenseCategoryRecord[]; saving: boolean; deletingId: string; onAdd: (name: string) => Promise<boolean>; onDelete: (category: ExpenseCategoryRecord) => void }) {
+  const [name, setName] = useState("");
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (await onAdd(name)) setName("");
+  };
+  return <div className="section-stack settings-category-manager"><PageHead copy="Administrators can add categories for future expense records. Built-in categories and historical expense entries remain protected." /><div className="settings-grid"><article className="panel settings-create-card"><span className="overline">Expense setup</span><h2>Add a new category</h2><p>Custom categories become available immediately in expense forms for every permitted role.</p><form onSubmit={submit}><Field label="Category name *"><input value={name} onChange={(event) => setName(event.target.value)} required maxLength={60} placeholder="e.g. Equipment repair" /></Field><button type="submit" className="btn btn-primary" disabled={saving || !name.trim()}>{saving ? "Adding…" : "＋ Add category"}</button></form></article><article className="panel settings-list-card"><div className="panel-head"><div><span className="overline">Category library</span><h3>Expense categories</h3></div><span className="schedule-count">{EXPENSE_CATEGORIES.length + customCategories.length}</span></div><div className="settings-category-list">{EXPENSE_CATEGORIES.map((category) => <div className="settings-category-row" key={category}><div><strong>{category}</strong><span>Built-in category</span></div><span className="settings-lock">Protected</span></div>)}{customCategories.map((category) => <div className="settings-category-row" key={category.id}><div><strong>{category.name}</strong><span>Custom category</span></div><button type="button" className="btn-icon-danger" disabled={deletingId === category.id} onClick={() => onDelete(category)} aria-label={`Delete ${category.name}`}>{deletingId === category.id ? "…" : "Delete"}</button></div>)}</div></article></div></div>;
 }
 
 function CustomersPage({ customers, customerBalance, openModal, viewCustomer, user }: { customers: Customer[]; customerBalance: (customer: Customer) => number; openModal: (kind: Exclude<ModalKind, null>) => void; viewCustomer: (customer: Customer) => void; user: PublicUser }) {
@@ -642,6 +736,7 @@ function RecordModal({ kind, data, user, preferredVendorId, editingOrder, editin
   const [paymentVendorId, setPaymentVendorId] = useState(editingPayment?.vendorId ?? "");
   const [manualOrderEntry, setManualOrderEntry] = useState(Boolean(editingPayment?.manualOrderId));
   const [paymentOrderId, setPaymentOrderId] = useState(editingPayment?.manualOrderId ? "__manual__" : editingPayment?.orderId ?? "");
+	  const availableExpenseCategories = [...EXPENSE_CATEGORIES, ...data.expenseCategories.map((category) => category.name)];
 	  const [paymentAllocations, setPaymentAllocations] = useState<Record<string, number>>({});
 	  const [orderVendorDrafts, setOrderVendorDrafts] = useState<OrderVendorDraft[]>(() => editingOrder
 	    ? data.orderVendors.filter((assignment) => assignment.orderId === editingOrder.id).map((assignment) => ({ key: assignment.id, vendorId: assignment.vendorId, productName: assignment.productName, amount: assignment.amount, notes: assignment.notes }))
@@ -726,7 +821,7 @@ function RecordModal({ kind, data, user, preferredVendorId, editingOrder, editin
       {user.role === "admin" && <div className="field field-wide order-vendor-builder order-vendor-editor"><span>{editingOrder ? "Update vendors for this order" : "Vendors for this order"}</span>{orderVendorDrafts.map((draft, index) => <div className="order-vendor-draft" key={draft.key}><VendorSelect vendors={data.vendors} name={`vendor-draft-${index}`} defaultValue={draft.vendorId} onChange={(vendorId) => setOrderVendorDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, vendorId } : item))} /><input aria-label={`Product for vendor ${index + 1}`} required placeholder="Product or service" value={draft.productName} onChange={(event) => setOrderVendorDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, productName: event.target.value } : item))} /><input aria-label={`Amount for vendor ${index + 1}`} required type="number" min="1" placeholder="Amount" value={draft.amount || ""} onChange={(event) => setOrderVendorDrafts((current) => current.map((item) => item.key === draft.key ? { ...item, amount: Math.max(0, Math.round(Number(event.target.value) || 0)) } : item))} /><button type="button" className="icon-btn" aria-label={`Remove vendor ${index + 1}`} onClick={() => setOrderVendorDrafts((current) => current.filter((item) => item.key !== draft.key))}>×</button></div>)}<button type="button" className="btn btn-secondary btn-small" onClick={() => setOrderVendorDrafts((current) => [...current, { key: crypto.randomUUID(), vendorId: "", productName: "", amount: 0, notes: "" }])}>＋ Add another vendor</button><input type="hidden" name="vendorAssignments" value={JSON.stringify(orderVendorDrafts.map(({ vendorId, productName, amount, notes }) => ({ vendorId, productName, amount, notes })))} /></div>}
       {editingOrder?.attachmentKey && user.role !== "supervisor" && <a className="file-link field-wide" href={`/api/upload?key=${encodeURIComponent(editingOrder.attachmentKey)}`} target="_blank" rel="noreferrer">▤ View attached {editingOrder.attachmentName || "order document"}</a>}
     </>}
-    {kind === "expense" && <><Field label="Expense number *"><input name="expenseNo" required defaultValue={nextExpense} /></Field><Field label="Order *"><OrderSelect orders={data.orders} name="orderId" value={expenseOrderId} onChange={setExpenseOrderId} /></Field>{user.role !== "supervisor" && <Field label="Person responsible *"><PersonSelect persons={eligibleExpensePeople} name="personId" emptyLabel={expenseOrderId ? "No eligible active person for this order" : "Select an order first"} /></Field>}<Field label="Expense date *"><input name="expenseDate" required type="date" defaultValue={today()} /></Field><Field label="Category *"><select name="category" required>{EXPENSE_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></Field><Field label="Amount *"><input name="amount" required type="number" min="1" placeholder="0" /></Field><Field label="Payment mode"><select name="paymentMode"><option>UPI</option><option>Bank transfer</option><option>Cash</option><option>Credit card</option><option>Cheque</option></select></Field><Field label="Description" wide><textarea name="description" rows={2} placeholder="What was this expense for?" /></Field><FileField file={file} setFile={setFile} label="Attach receipt (optional)" /></>}
+    {kind === "expense" && <><Field label="Expense number *"><input name="expenseNo" required defaultValue={nextExpense} /></Field><Field label="Order *"><OrderSelect orders={data.orders} name="orderId" value={expenseOrderId} onChange={setExpenseOrderId} /></Field>{user.role !== "supervisor" && <Field label="Person responsible *"><PersonSelect persons={eligibleExpensePeople} name="personId" emptyLabel={expenseOrderId ? "No eligible active person for this order" : "Select an order first"} /></Field>}<Field label="Expense date *"><input name="expenseDate" required type="date" defaultValue={today()} /></Field><Field label="Category *"><select name="category" required>{availableExpenseCategories.map((category) => <option key={category}>{category}</option>)}</select></Field><Field label="Amount *"><input name="amount" required type="number" min="1" placeholder="0" /></Field><Field label="Payment mode"><select name="paymentMode"><option>UPI</option><option>Bank transfer</option><option>Cash</option><option>Credit card</option><option>Cheque</option></select></Field><Field label="Description" wide><textarea name="description" rows={2} placeholder="What was this expense for?" /></Field><FileField file={file} setFile={setFile} label="Attach receipt (optional)" /></>}
     {kind === "payment" && <>
       <Field label="Payment type *">
         <select name="direction" required value={paymentDirection} onChange={(event) => {

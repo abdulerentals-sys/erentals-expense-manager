@@ -3,12 +3,13 @@ import { canCreateRecord, canRecordPayment, filterRecordData } from "../../auth/
 import { getSessionUser } from "../../auth/session";
 import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
-import { isAllowedExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
+import { expenseCategoryKey, isAllowedExpenseCategory, isBuiltInExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis } from "../../vendor-pricing";
 import { getDb } from "../../../db";
 import { ensureSchema } from "../../../db/ensure";
 import {
   customers,
+  expenseCategories,
   expenses,
   invoices,
   orderProducts,
@@ -132,7 +133,7 @@ export async function GET() {
   try {
     await ensureSchema();
     const db = getDb();
-    const [customerRows, personRows, vendorRows, vendorProductRows, orderRows, orderProductRows, orderVendorRows, invoiceRows, expenseRows, paymentRows] =
+    const [customerRows, personRows, vendorRows, vendorProductRows, orderRows, orderProductRows, orderVendorRows, invoiceRows, expenseRows, expenseCategoryRows, paymentRows] =
       await Promise.all([
         db.select().from(customers).orderBy(desc(customers.createdAt)),
         db.select().from(persons).orderBy(desc(persons.createdAt)),
@@ -143,6 +144,7 @@ export async function GET() {
         db.select().from(orderVendors).orderBy(desc(orderVendors.createdAt)),
         db.select().from(invoices).orderBy(desc(invoices.createdAt)),
         db.select().from(expenses).orderBy(desc(expenses.createdAt)),
+        db.select().from(expenseCategories).where(eq(expenseCategories.status, "Active")).orderBy(expenseCategories.name),
         db.select().from(payments).orderBy(desc(payments.createdAt)),
       ]);
 
@@ -170,6 +172,7 @@ export async function GET() {
       orderVendors: orderVendorRows,
       invoices: invoiceRows,
       expenses: expenseRows,
+      expenseCategories: expenseCategoryRows,
       payments: normalizedPayments,
     }, user.role, user.personId, user.name, user.email));
   } catch (error) {
@@ -286,6 +289,23 @@ export async function POST(request: Request) {
       if (!rentalCharge) return Response.json({ error: "Rental charge must be greater than zero" }, { status: 400 });
       const row = { id: crypto.randomUUID(), vendorId, name: clean(payload.name), productType, pricingBasis, rentalCharge, status: "Active", createdAt };
       await db.insert(vendorProducts).values(row);
+      return Response.json({ record: row }, { status: 201 });
+    }
+
+    if (type === "expenseCategory") {
+      const name = clean(payload.name).replace(/\s+/g, " ");
+      if (!name) return Response.json({ error: "Category name is required" }, { status: 400 });
+      if (name.length > 60) return Response.json({ error: "Category name must be 60 characters or fewer" }, { status: 400 });
+      if (isBuiltInExpenseCategory(name)) return Response.json({ error: "That built-in category already exists" }, { status: 400 });
+      const nameKey = expenseCategoryKey(name);
+      const [existing] = await db.select().from(expenseCategories).where(eq(expenseCategories.nameKey, nameKey)).limit(1);
+      if (existing?.status === "Active") return Response.json({ error: "That category already exists" }, { status: 400 });
+      if (existing) {
+        await db.update(expenseCategories).set({ name, status: "Active" }).where(eq(expenseCategories.id, existing.id));
+        return Response.json({ record: { ...existing, name, status: "Active" } }, { status: 201 });
+      }
+      const row = { id: crypto.randomUUID(), name, nameKey, status: "Active", createdAt };
+      await db.insert(expenseCategories).values(row);
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -502,7 +522,8 @@ export async function POST(request: Request) {
       }
       const orderId = clean(payload.orderId);
       const category = clean(payload.category);
-      if (!isAllowedExpenseCategory(category)) {
+      const customCategories = await db.select({ name: expenseCategories.name }).from(expenseCategories).where(eq(expenseCategories.status, "Active"));
+      if (!isAllowedExpenseCategory(category, customCategories.map((item) => item.name))) {
         return Response.json({ error: "Select a valid expense category" }, { status: 400 });
       }
       let personId = clean(payload.personId);
@@ -847,15 +868,16 @@ export async function DELETE(request: Request) {
   const user = await getSessionUser();
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
   if (user.mustChangePassword) return Response.json({ error: "Change your temporary password before using the dashboard" }, { status: 403 });
-  if (!canCreateRecord(user.role, "vendorProduct")) return Response.json({ error: "Your role cannot delete vendor products" }, { status: 403 });
   let body: { type?: string; id?: string };
   try {
     body = await request.clone().json() as typeof body;
   } catch {
     return Response.json({ error: "Invalid request" }, { status: 400 });
   }
+  const type = clean(body.type);
   const id = clean(body.id);
-  if (clean(body.type) !== "vendorProduct" || !id) return Response.json({ error: "Select a valid vendor product" }, { status: 400 });
+  if (!id || !["vendorProduct", "expenseCategory"].includes(type)) return Response.json({ error: "Select a valid record to delete" }, { status: 400 });
+  if (!canCreateRecord(user.role, type)) return Response.json({ error: "Your role cannot delete this record" }, { status: 403 });
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
     return mongodb.DELETE(request, { userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
@@ -863,6 +885,12 @@ export async function DELETE(request: Request) {
   try {
     await ensureSchema();
     const db = getDb();
+    if (type === "expenseCategory") {
+      const [category] = await db.select().from(expenseCategories).where(and(eq(expenseCategories.id, id), eq(expenseCategories.status, "Active"))).limit(1);
+      if (!category) return Response.json({ error: "Expense category not found" }, { status: 404 });
+      await db.update(expenseCategories).set({ status: "Deleted" }).where(eq(expenseCategories.id, id));
+      return Response.json({ record: { ...category, status: "Deleted" } });
+    }
     const [product] = await db.select().from(vendorProducts).where(and(eq(vendorProducts.id, id), ne(vendorProducts.status, "Deleted"))).limit(1);
     if (!product) return Response.json({ error: "Vendor product not found" }, { status: 404 });
     await db.update(vendorProducts).set({ status: "Deleted" }).where(eq(vendorProducts.id, id));
