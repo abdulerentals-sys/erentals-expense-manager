@@ -1,8 +1,8 @@
-import { and, desc, eq, ne, sql } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { canCreateRecord, canRecordPayment, filterRecordData } from "../../auth/permissions";
 import { getSessionUser } from "../../auth/session";
-import { listUsers } from "../../auth/store";
-import { isOrderTeamPerson, type TeamAssignment } from "../../auth/team";
+import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
+import type { UserRole } from "../../auth/types";
 import { isAllowedExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis } from "../../vendor-pricing";
 import { getDb } from "../../../db";
@@ -107,21 +107,14 @@ function orderScheduleError(payload: Record<string, unknown>, pickupFromGodown: 
   return "";
 }
 
-async function teamAssignments(): Promise<TeamAssignment[]> {
-  return (await listUsers()).map(({ personId, role, status }) => ({ personId, role, status }));
-}
-
 function usesNetlifyStorage() {
   return typeof process !== "undefined" && Boolean(process.env.MONGODB_URI?.trim());
 }
 
-async function findSupervisorPerson(db: ReturnType<typeof getDb>, personId: string, legacyEmail: string) {
-  if (personId) {
-    const [person] = await db.select().from(persons).where(eq(persons.id, personId)).limit(1);
-    return person;
-  }
-  const [person] = await db.select().from(persons).where(sql`lower(${persons.email}) = ${legacyEmail.toLowerCase()}`).limit(1);
-  return person;
+async function findSessionPerson(db: ReturnType<typeof getDb>, user: { personId: string; name: string; email: string; role: UserRole }) {
+  const people = await db.select().from(persons).where(eq(persons.status, "Active"));
+  const personId = resolveUserPersonId(people, user);
+  return people.find((person) => person.id === personId);
 }
 
 export async function GET() {
@@ -132,14 +125,14 @@ export async function GET() {
     const mongodb = await import("./mongodb");
     const response = await mongodb.GET();
     if (!response.ok) return response;
-    const data = { ...(await response.json() as Record<string, unknown>), teamAssignments: await teamAssignments() };
-    return Response.json(filterRecordData(data, user.role, user.personId, user.email));
+    const data = await response.json() as Record<string, unknown>;
+    return Response.json(filterRecordData(data, user.role, user.personId, user.name, user.email));
   }
 
   try {
     await ensureSchema();
     const db = getDb();
-    const [customerRows, personRows, vendorRows, vendorProductRows, orderRows, orderProductRows, orderVendorRows, invoiceRows, expenseRows, paymentRows, assignmentRows] =
+    const [customerRows, personRows, vendorRows, vendorProductRows, orderRows, orderProductRows, orderVendorRows, invoiceRows, expenseRows, paymentRows] =
       await Promise.all([
         db.select().from(customers).orderBy(desc(customers.createdAt)),
         db.select().from(persons).orderBy(desc(persons.createdAt)),
@@ -151,7 +144,6 @@ export async function GET() {
         db.select().from(invoices).orderBy(desc(invoices.createdAt)),
         db.select().from(expenses).orderBy(desc(expenses.createdAt)),
         db.select().from(payments).orderBy(desc(payments.createdAt)),
-        teamAssignments(),
       ]);
 
     const orderByInvoice = new Map(invoiceRows.map((invoice) => [invoice.id, invoice.orderId]));
@@ -179,8 +171,7 @@ export async function GET() {
       invoices: invoiceRows,
       expenses: expenseRows,
       payments: normalizedPayments,
-      teamAssignments: assignmentRows,
-    }, user.role, user.personId, user.email));
+    }, user.role, user.personId, user.name, user.email));
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Unable to load records" },
@@ -215,7 +206,7 @@ export async function POST(request: Request) {
   }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.POST(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email, teamAssignments: await teamAssignments() });
+    return mongodb.POST(request, { userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
   }
 
   try {
@@ -253,8 +244,8 @@ export async function POST(request: Request) {
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       const orderId = clean(payload.orderId);
       if (user.role === "supervisor") {
-        const supervisorPerson = await findSupervisorPerson(db, user.personId, user.email);
-        if (!supervisorPerson) return Response.json({ error: "Supervisor profile is not linked to a Person record" }, { status: 400 });
+        const supervisorPerson = await findSessionPerson(db, user);
+        if (!supervisorPerson) return Response.json({ error: "Add an active People record with your name and Supervisor role" }, { status: 400 });
         const [ownedOrder] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.id, orderId), eq(orders.assignedPersonId, supervisorPerson.id), ne(orders.status, "Completed"), ne(orders.status, "Cancelled"))).limit(1);
         if (!ownedOrder) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       }
@@ -306,10 +297,10 @@ export async function POST(request: Request) {
       }
       const customerId = clean(payload.customerId);
       const userRole = user.role;
-      const context = { userPersonId: user.personId };
-      const salespersonId = userRole === "sales" ? context.userPersonId : clean(payload.salespersonId);
+      const sessionPerson = userRole === "sales" ? await findSessionPerson(db, user) : undefined;
+      const salespersonId = userRole === "sales" ? sessionPerson?.id ?? "" : clean(payload.salespersonId);
       const assignedPersonId = clean(payload.assignedPersonId);
-      if (!salespersonId && userRole === "sales") return Response.json({ error: "Sales dashboard is not linked to a People record" }, { status: 400 });
+      if (!salespersonId && userRole === "sales") return Response.json({ error: "Add an active People record with your name and Sales person role" }, { status: 400 });
       if (!salespersonId) return Response.json({ error: "salespersonId is required" }, { status: 400 });
       const pickupFromGodown = asBoolean(payload.pickupFromGodown);
       const scheduleError = orderScheduleError(payload, pickupFromGodown);
@@ -319,13 +310,12 @@ export async function POST(request: Request) {
         db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, salespersonId)).limit(1),
         db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
       ]);
-      const assignmentsForTeam = await teamAssignments();
       if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
       if (!salesperson) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
       if (!assignedPerson) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
       if (salesperson.status !== "Active" || assignedPerson.status !== "Active") return Response.json({ error: "Select active team members for the order" }, { status: 400 });
-      if (!isOrderTeamPerson(salesperson, "salesperson", assignmentsForTeam)) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
-      if (!isOrderTeamPerson(assignedPerson, "supervisor", assignmentsForTeam)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
+      if (!isOrderTeamPerson(salesperson, "salesperson")) return Response.json({ error: "Select a valid salesperson from People" }, { status: 400 });
+      if (!isOrderTeamPerson(assignedPerson, "supervisor")) return Response.json({ error: "Select a valid supervisor from People" }, { status: 400 });
       const contractValue = money(payload.contractValue);
       if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
       const advancePayment = money(payload.advancePayment);
@@ -424,8 +414,8 @@ export async function POST(request: Request) {
       if (!vendor) return Response.json({ error: "Select a valid vendor" }, { status: 400 });
       if (!product || product.vendorId !== vendorId) return Response.json({ error: "Select a product listed by this vendor" }, { status: 400 });
       if (user.role === "supervisor") {
-        const supervisorPerson = await findSupervisorPerson(db, user.personId, user.email);
-        if (!supervisorPerson) return Response.json({ error: "Supervisor profile is not linked to a Person record" }, { status: 400 });
+        const supervisorPerson = await findSessionPerson(db, user);
+        if (!supervisorPerson) return Response.json({ error: "Add an active People record with your name and Supervisor role" }, { status: 400 });
         const [ownedOrder] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.id, orderId), eq(orders.assignedPersonId, supervisorPerson.id), ne(orders.status, "Completed"), ne(orders.status, "Cancelled"))).limit(1);
         if (!ownedOrder) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       }
@@ -517,10 +507,10 @@ export async function POST(request: Request) {
       }
       let personId = clean(payload.personId);
       if (user.role === "supervisor") {
-        const supervisorPerson = await findSupervisorPerson(db, user.personId, user.email);
-        if (!supervisorPerson) return Response.json({ error: "Supervisor profile is not linked to a Person record" }, { status: 400 });
+        const supervisorPerson = await findSessionPerson(db, user);
+        if (!supervisorPerson) return Response.json({ error: "Add an active People record with your name and Supervisor role" }, { status: 400 });
         if (personId && personId !== supervisorPerson.id) {
-          return Response.json({ error: "Supervisor expenses are assigned to your linked Person record" }, { status: 400 });
+          return Response.json({ error: "Supervisor expenses are assigned to your People role automatically" }, { status: 400 });
         }
         if (clean(payload.vendorId) || clean(payload.vendor)) {
           return Response.json({ error: "Vendor or payee cannot be recorded on an expense" }, { status: 400 });
@@ -645,8 +635,8 @@ export async function PATCH(request: Request) {
   if (!id || !["order", "payment", "vendorProduct"].includes(type)) {
     return Response.json({ error: "Select a valid record to edit" }, { status: 400 });
   }
-  if (type === "order" && !["admin", "supervisor"].includes(user.role)) {
-    return Response.json({ error: "Only an administrator or the assigned supervisor can edit orders" }, { status: 403 });
+  if (type === "order" && !["admin", "supervisor", "sales"].includes(user.role)) {
+    return Response.json({ error: "Only an administrator, assigned salesperson or assigned supervisor can edit orders" }, { status: 403 });
   }
   if (type === "payment" && !canRecordPayment(user.role, clean(payload.direction))) {
     return Response.json({ error: "Your role cannot edit this payment" }, { status: 403 });
@@ -656,7 +646,7 @@ export async function PATCH(request: Request) {
   }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.PATCH(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email, teamAssignments: await teamAssignments() });
+    return mongodb.PATCH(request, { userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
   }
 
   try {
@@ -734,7 +724,7 @@ export async function PATCH(request: Request) {
       return Response.json({ record: { ...existingPayment, ...updates } });
     }
 
-    const missing = required(payload, user.role === "supervisor" ? ["eventDate"] : ["orderNo", "customerId", "salespersonId", "assignedPersonId", "eventDate"]);
+    const missing = required(payload, user.role === "supervisor" ? ["eventDate"] : user.role === "sales" ? ["orderNo", "customerId", "assignedPersonId", "eventDate"] : ["orderNo", "customerId", "salespersonId", "assignedPersonId", "eventDate"]);
     if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
     if (invalidDate(payload, ["eventDate"])) {
       return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
@@ -744,7 +734,8 @@ export async function PATCH(request: Request) {
     if (scheduleError) return Response.json({ error: scheduleError }, { status: 400 });
 
     const customerId = clean(payload.customerId);
-    const salespersonId = clean(payload.salespersonId);
+    const sessionPerson = user.role === "sales" ? await findSessionPerson(db, user) : undefined;
+    const salespersonId = user.role === "sales" ? sessionPerson?.id ?? "" : clean(payload.salespersonId);
     const assignedPersonId = clean(payload.assignedPersonId);
     const [[existingOrder], [customer], [salesperson], [assignedPerson]] = await Promise.all([
       db.select().from(orders).where(eq(orders.id, id)).limit(1),
@@ -754,8 +745,8 @@ export async function PATCH(request: Request) {
     ]);
     if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
     if (user.role === "supervisor") {
-      const supervisorPerson = await findSupervisorPerson(db, user.personId, user.email);
-      if (!supervisorPerson) return Response.json({ error: "Supervisor profile is not linked to a Person record" }, { status: 400 });
+      const supervisorPerson = await findSessionPerson(db, user);
+      if (!supervisorPerson) return Response.json({ error: "Add an active People record with your name and Supervisor role" }, { status: 400 });
       if (existingOrder.assignedPersonId !== supervisorPerson.id || ["Completed", "Cancelled"].includes(existingOrder.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       const updates = {
         title: clean(payload.title),
@@ -775,18 +766,32 @@ export async function PATCH(request: Request) {
       await db.update(orders).set(updates).where(eq(orders.id, id));
       return Response.json({ record: { ...existingOrder, ...updates, salespersonId: existingOrder.salespersonId, assignedPersonId: existingOrder.assignedPersonId, contractValue: 0 } });
     }
-    const assignmentsForTeam = await teamAssignments();
+    if (user.role === "sales" && (!salespersonId || existingOrder.salespersonId !== salespersonId)) {
+      return Response.json({ error: "Salespeople can only edit orders assigned to their People role" }, { status: 403 });
+    }
     if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
     if (!salesperson) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
     if (!assignedPerson) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
     if (salesperson.status !== "Active" || assignedPerson.status !== "Active") return Response.json({ error: "Select active team members for the order" }, { status: 400 });
-    if (!isOrderTeamPerson(salesperson, "salesperson", assignmentsForTeam)) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
-    if (!isOrderTeamPerson(assignedPerson, "supervisor", assignmentsForTeam)) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
+    if (!isOrderTeamPerson(salesperson, "salesperson")) return Response.json({ error: "Select a valid salesperson from People" }, { status: 400 });
+    if (!isOrderTeamPerson(assignedPerson, "supervisor")) return Response.json({ error: "Select a valid supervisor from People" }, { status: 400 });
     const contractValue = money(payload.contractValue);
     if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
     const products = orderProductInputs(payload);
     if (products.some((item) => !item.name || !item.quantity || !item.price)) {
       return Response.json({ error: "Complete the product name, quantity and price for every product" }, { status: 400 });
+    }
+    const assignments = user.role === "admin" ? vendorAssignments(payload) : [];
+    if (assignments.some((item) => !item.vendorId || !item.productName || !item.amount)) {
+      return Response.json({ error: "Complete the vendor, product and amount for every assignment" }, { status: 400 });
+    }
+    if (user.role === "admin") {
+      const uniqueVendorIds = [...new Set(assignments.map((item) => item.vendorId))];
+      const validVendors = await Promise.all(uniqueVendorIds.map(async (vendorId) => {
+        const [vendor] = await db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1);
+        return vendor;
+      }));
+      if (validVendors.some((vendor) => !vendor)) return Response.json({ error: "Select valid vendors for the order" }, { status: 400 });
     }
     const firstProduct = products[0];
 
@@ -816,7 +821,16 @@ export async function PATCH(request: Request) {
       contractValue,
     };
     const productRows = products.map((product) => ({ id: crypto.randomUUID(), orderId: id, ...product, amount: product.quantity * product.price, createdAt: now() }));
-    if (productRows.length) {
+    const assignmentRows = assignments.map((assignment) => ({ id: crypto.randomUUID(), orderId: id, productId: "", productType: "Quantity-wise", pricingBasis: "Per event", unitRate: assignment.amount, quantity: 1, measurement: 1, rentalDays: 1, ...assignment, createdAt: now() }));
+    if (user.role === "admin" && productRows.length && assignmentRows.length) {
+      await db.batch([db.update(orders).set(updates).where(eq(orders.id, id)), db.delete(orderProducts).where(eq(orderProducts.orderId, id)), db.insert(orderProducts).values(productRows), db.delete(orderVendors).where(eq(orderVendors.orderId, id)), db.insert(orderVendors).values(assignmentRows)]);
+    } else if (user.role === "admin" && productRows.length) {
+      await db.batch([db.update(orders).set(updates).where(eq(orders.id, id)), db.delete(orderProducts).where(eq(orderProducts.orderId, id)), db.insert(orderProducts).values(productRows), db.delete(orderVendors).where(eq(orderVendors.orderId, id))]);
+    } else if (user.role === "admin" && assignmentRows.length) {
+      await db.batch([db.update(orders).set(updates).where(eq(orders.id, id)), db.delete(orderProducts).where(eq(orderProducts.orderId, id)), db.delete(orderVendors).where(eq(orderVendors.orderId, id)), db.insert(orderVendors).values(assignmentRows)]);
+    } else if (user.role === "admin") {
+      await db.batch([db.update(orders).set(updates).where(eq(orders.id, id)), db.delete(orderProducts).where(eq(orderProducts.orderId, id)), db.delete(orderVendors).where(eq(orderVendors.orderId, id))]);
+    } else if (productRows.length) {
       await db.batch([db.update(orders).set(updates).where(eq(orders.id, id)), db.delete(orderProducts).where(eq(orderProducts.orderId, id)), db.insert(orderProducts).values(productRows)]);
     } else {
       await db.batch([db.update(orders).set(updates).where(eq(orders.id, id)), db.delete(orderProducts).where(eq(orderProducts.orderId, id))]);
@@ -844,7 +858,7 @@ export async function DELETE(request: Request) {
   if (clean(body.type) !== "vendorProduct" || !id) return Response.json({ error: "Select a valid vendor product" }, { status: 400 });
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.DELETE(request, { userRole: user.role, userPersonId: user.personId, userEmail: user.email, teamAssignments: [] });
+    return mongodb.DELETE(request, { userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
   }
   try {
     await ensureSchema();

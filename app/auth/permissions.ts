@@ -1,3 +1,4 @@
+import { resolveUserPersonId } from "./team";
 import type { UserRole } from "./types";
 
 export type DashboardSection =
@@ -61,17 +62,19 @@ export function visibleSections(role: UserRole) {
   return sectionsByRole[role];
 }
 
-export function filterRecordData<T extends Record<string, unknown>>(data: T, role: UserRole, userPersonId = "", legacyUserEmail = ""): T {
+export function filterRecordData<T extends Record<string, unknown>>(data: T, role: UserRole, userPersonId = "", userName = "", userEmail = ""): T {
   if (role === "admin" || role === "accountant") return data;
+  const people = Array.isArray(data.persons) ? data.persons as Array<Record<string, unknown>> : [];
+  const currentPersonId = resolveUserPersonId(people.map((person) => ({
+    id: String(person.id ?? ""),
+    name: String(person.name ?? ""),
+    email: String(person.email ?? ""),
+    role: String(person.role ?? ""),
+    status: String(person.status ?? ""),
+  })), { personId: userPersonId, name: userName, email: userEmail, role });
   if (role === "supervisor") {
-    const people = Array.isArray(data.persons) ? data.persons as Array<Record<string, unknown>> : [];
     const allOrders = Array.isArray(data.orders) ? data.orders as Array<Record<string, unknown>> : [];
-    const normalizedEmail = legacyUserEmail.trim().toLowerCase();
-    const supervisorPersonIds = new Set(
-      userPersonId
-        ? people.filter((person) => String(person.id ?? "") === userPersonId).map((person) => String(person.id ?? ""))
-        : people.filter((person) => normalizedEmail && String(person.email ?? "").trim().toLowerCase() === normalizedEmail).map((person) => String(person.id ?? "")),
-    );
+    const supervisorPersonIds = new Set(currentPersonId ? [currentPersonId] : []);
     const ownOrders = allOrders.filter((order) => supervisorPersonIds.has(String(order.assignedPersonId ?? "")));
     const activeOrders = ownOrders.filter((order) => order.status !== "Completed" && order.status !== "Cancelled");
     const activeOrderIds = new Set(activeOrders.map((order) => String(order.id ?? "")));
@@ -101,10 +104,12 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
       payments: [],
       supervisorLinked: supervisorPersonIds.size > 0,
       supervisorOrderIds: [...allOrderIds],
+      currentPersonId,
     } as T;
   }
   const hidden = ["expenses", "vendors", "vendorProducts", "orderVendors"];
-  return Object.fromEntries(
+  return {
+    ...Object.fromEntries(
     Object.entries(data).map(([key, value]) => {
       if (hidden.includes(key)) return [key, []];
       if (role === "sales" && key === "payments" && Array.isArray(value)) {
@@ -112,5 +117,7 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
       }
       return [key, value];
     }),
-  ) as T;
+    ),
+    currentPersonId,
+  } as unknown as T;
 }

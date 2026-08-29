@@ -51,7 +51,7 @@ test("D1 and Mongo expense writes enforce role ownership and clear payee fields"
   for (const source of [route, mongo]) {
     assert.match(source, /isAllowedExpenseCategory/);
     assert.match(source, /isExpenseResponsiblePerson/);
-    assert.match(source, /Supervisor expenses are assigned to your linked Person record/);
+    assert.match(source, /Supervisor expenses are assigned to your People role automatically/);
     assert.match(source, /Vendor or payee cannot be recorded on an expense/);
     assert.match(source, /vendor:\s*""/);
     assert.match(source, /vendorId:\s*""/);

@@ -6,7 +6,9 @@ import ts from "typescript";
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
 async function loadPermissions() {
-  const source = await read("app/auth/permissions.ts");
+  const team = await read("app/auth/team.ts");
+  const permissions = (await read("app/auth/permissions.ts")).replace('import { resolveUserPersonId } from "./team";\n', "");
+  const source = `${team}\n${permissions}`;
   const output = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   }).outputText;
@@ -20,11 +22,11 @@ test("supervisor workspace is ownership-scoped and has read-only history", async
     read("app/api/records/route.ts"),
   ]);
   assert.match(permissions, /"history"/);
-  assert.match(permissions, /filterRecordData[\s\S]*userPersonId[\s\S]*legacyUserEmail/);
+  assert.match(permissions, /filterRecordData[\s\S]*userPersonId[\s\S]*userName[\s\S]*userEmail/);
   assert.match(permissions, /status !== "Completed"/);
   assert.match(dashboard, /href: "\/history"/);
   assert.match(dashboard, /function SupervisorHistoryPage/);
-  assert.match(route, /filterRecordData\(data, user\.role, user\.personId, user\.email\)/);
+  assert.match(route, /filterRecordData\(data, user\.role, user\.personId, user\.name, user\.email\)/);
 });
 
 test("supervisor records never expose legacy invoices or their attachment keys", async () => {
@@ -37,7 +39,7 @@ test("supervisor records never expose legacy invoices or their attachment keys",
   };
   const data = {
     customers: [],
-    persons: [{ id: "supervisor-1", email: "supervisor@example.com" }],
+    persons: [{ id: "supervisor-1", name: "Supervisor", role: "Supervisor", status: "Active", email: "supervisor@example.com" }],
     vendors: [],
     vendorProducts: [],
     orders: [{ id: "order-1", assignedPersonId: "supervisor-1", status: "In progress", customerId: "customer-1" }],
@@ -48,7 +50,7 @@ test("supervisor records never expose legacy invoices or their attachment keys",
     payments: [],
   };
 
-  const supervisorData = filterRecordData(data, "supervisor", "supervisor-1", "supervisor@example.com");
+  const supervisorData = filterRecordData(data, "supervisor", "supervisor-1", "Supervisor", "supervisor@example.com");
   assert.deepEqual(supervisorData.invoices, []);
   assert.equal(JSON.stringify(supervisorData).includes(invoice.attachmentKey), false);
 
@@ -84,7 +86,7 @@ test("supervisor contacts and expenses require an owned active order", async () 
   assert.match(dashboard, /kind === "person"[\s\S]*user\.role === "supervisor"[\s\S]*name="orderId"/);
   for (const source of [route, mongo]) {
     assert.match(source, /Supervisor actions require an active assigned order/);
-    assert.match(source, /Supervisor profile is not linked to a Person record/);
+    assert.match(source, /Add an active People record with your name and Supervisor role/);
   }
 });
 
@@ -93,7 +95,7 @@ test("supervisor order edits cannot change financial or ownership fields", async
     read("app/api/records/route.ts"), read("app/api/records/mongodb.ts"),
   ]);
   for (const source of [route, mongo]) {
-    assert.match(source, /Only an administrator or the assigned supervisor can edit orders/);
+    assert.match(source, /Only an administrator, assigned salesperson or assigned supervisor can edit orders/);
     assert.match(source, /(user\.role|userRole) === "supervisor"/);
     assert.match(source, /assignedPersonId/);
   }

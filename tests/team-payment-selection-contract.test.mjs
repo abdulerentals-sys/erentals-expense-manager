@@ -5,38 +5,37 @@ import ts from "typescript";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
-test("order team eligibility includes active People roles and linked Team Access roles", async () => {
+test("order team eligibility comes only from active People roles", async () => {
   const source = await read("app/auth/team.ts");
   const output = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   const team = await import(`data:text/javascript;base64,${Buffer.from(output).toString("base64")}`);
-  const genericPerson = { id: "person-1", role: "Team member", status: "Active" };
-
-  assert.equal(team.isOrderTeamPerson(genericPerson, "salesperson", [
-    { personId: "person-1", role: "sales", status: "Active" },
-  ]), true);
-  assert.equal(team.isOrderTeamPerson(genericPerson, "supervisor", [
-    { personId: "person-1", role: "supervisor", status: "Active" },
-  ]), true);
-  assert.equal(team.isOrderTeamPerson({ id: "person-2", role: "Sales & billing", status: "Active" }, "salesperson", []), true);
-  assert.equal(team.isOrderTeamPerson({ id: "person-3", role: "Execution manager", status: "Active" }, "supervisor", []), true);
-  assert.equal(team.isOrderTeamPerson({ id: "person-4", role: "Supervisor", status: "Disabled" }, "supervisor", []), false);
+  assert.equal(team.isOrderTeamPerson({ id: "person-1", role: "Team member", status: "Active" }, "salesperson"), false);
+  assert.equal(team.isOrderTeamPerson({ id: "person-2", role: "Sales & billing", status: "Active" }, "salesperson"), true);
+  assert.equal(team.isOrderTeamPerson({ id: "person-3", role: "Execution manager", status: "Active" }, "supervisor"), true);
+  assert.equal(team.isOrderTeamPerson({ id: "person-4", role: "Supervisor", status: "Disabled" }, "supervisor"), false);
+  assert.equal(team.resolveUserPersonId([
+    { id: "person-2", name: "Asha", email: "", role: "Sales person", status: "Active" },
+  ], { name: "Asha", email: "different@example.com", role: "sales" }), "person-2");
 });
 
-test("order forms use linked Team Access assignments for salesperson and supervisor choices", async () => {
-  const [dashboard, sitesRoute, mongoRoute] = await Promise.all([
+test("order forms and APIs do not depend on Team Access links", async () => {
+  const [dashboard, usersUi, usersApi, sitesRoute, mongoRoute] = await Promise.all([
     read("app/components/ExpenseDashboard.tsx"),
+    read("app/components/UserManagement.tsx"),
+    read("app/api/users/route.ts"),
     read("app/api/records/route.ts"),
     read("app/api/records/mongodb.ts"),
   ]);
 
-  assert.match(dashboard, /teamAssignments/);
   assert.match(dashboard, /isOrderTeamPerson/);
-  assert.match(dashboard, /TeamPersonSelect[^\n]+teamAssignments/);
+  assert.doesNotMatch(dashboard, /teamAssignments/);
+  assert.doesNotMatch(usersUi, /Linked team member|Save link|name="personId"/);
+  assert.doesNotMatch(usersApi, /linkedPersonError|updateUserPerson/);
   for (const source of [sitesRoute, mongoRoute]) {
     assert.match(source, /isOrderTeamPerson/);
-    assert.match(source, /teamAssignments/);
+    assert.doesNotMatch(source, /teamAssignments/);
   }
 });
 

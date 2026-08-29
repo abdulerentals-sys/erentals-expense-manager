@@ -5,12 +5,13 @@ import {
   type Collection,
   type Filter,
 } from "mongodb";
-import { isOrderTeamPerson, type TeamAssignment } from "../../auth/team";
+import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
+import type { UserRole } from "../../auth/types";
 import { isAllowedExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis, type ProductType } from "../../vendor-pricing";
 
 type Payload = Record<string, unknown>;
-type RequestContext = { userRole: string; userPersonId: string; userEmail: string; teamAssignments: TeamAssignment[] };
+type RequestContext = { userRole: UserRole; userPersonId: string; userName: string; userEmail: string };
 
 type Customer = {
   id: string;
@@ -316,9 +317,15 @@ async function findById<T extends { id: string }>(
   return collection.findOne({ id } as Filter<T>, { projection: { _id: 0 } });
 }
 
-async function findSupervisorPerson(collections: Collections, context: RequestContext) {
-  if (context.userPersonId) return findById(collections.persons, context.userPersonId);
-  return collections.persons.findOne({ email: context.userEmail }, { collation: { locale: "en", strength: 2 } });
+async function findSessionPerson(collections: Collections, context: RequestContext) {
+  const people = await collections.persons.find({ status: "Active" }, { projection: { _id: 0 } }).toArray();
+  const personId = resolveUserPersonId(people, {
+    personId: context.userPersonId,
+    name: context.userName,
+    email: context.userEmail,
+    role: context.userRole,
+  });
+  return people.find((person) => person.id === personId);
 }
 
 export async function GET() {
@@ -371,7 +378,7 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userEmail: "", teamAssignments: [] }) {
+export async function POST(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userName: "", userEmail: "" }) {
   try {
     const body = (await request.json()) as { type?: string; payload?: Payload };
     const type = clean(body.type);
@@ -403,8 +410,8 @@ export async function POST(request: Request, context: RequestContext = { userRol
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       const orderId = clean(payload.orderId);
       if (userRole === "supervisor") {
-        const supervisorPerson = await findSupervisorPerson(collections, context);
-        if (!supervisorPerson) throw new FormError("Supervisor profile is not linked to a Person record");
+        const supervisorPerson = await findSessionPerson(collections, context);
+        if (!supervisorPerson) throw new FormError("Add an active People record with your name and Supervisor role");
         const ownedOrder = await collections.orders.findOne({ id: orderId, assignedPersonId: supervisorPerson.id, status: { $nin: ["Completed", "Cancelled"] } });
         if (!ownedOrder) throw new FormError("Supervisor actions require an active assigned order");
       }
@@ -455,9 +462,10 @@ export async function POST(request: Request, context: RequestContext = { userRol
         return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
       }
       const customerId = clean(payload.customerId);
-      const salespersonId = userRole === "sales" ? context.userPersonId : clean(payload.salespersonId);
+      const sessionPerson = userRole === "sales" ? await findSessionPerson(collections, context) : undefined;
+      const salespersonId = userRole === "sales" ? sessionPerson?.id ?? "" : clean(payload.salespersonId);
       const assignedPersonId = clean(payload.assignedPersonId);
-      if (!salespersonId && userRole === "sales") throw new FormError("Sales dashboard is not linked to a People record");
+      if (!salespersonId && userRole === "sales") throw new FormError("Add an active People record with your name and Sales person role");
       if (!salespersonId) throw new FormError("salespersonId is required");
       const pickupFromGodown = asBoolean(payload.pickupFromGodown);
       const scheduleError = orderScheduleError(payload, pickupFromGodown);
@@ -471,8 +479,8 @@ export async function POST(request: Request, context: RequestContext = { userRol
       if (!salesperson) throw new FormError("Select a valid salesperson from the team");
       if (!assignedPerson) throw new FormError("Select a valid supervisor from the team");
       if (salesperson.status !== "Active" || assignedPerson.status !== "Active") throw new FormError("Select active team members for the order");
-      if (!isOrderTeamPerson(salesperson, "salesperson", context.teamAssignments)) throw new FormError("Select a valid salesperson from the team");
-      if (!isOrderTeamPerson(assignedPerson, "supervisor", context.teamAssignments)) throw new FormError("Select a valid supervisor from the team");
+      if (!isOrderTeamPerson(salesperson, "salesperson")) throw new FormError("Select a valid salesperson from People");
+      if (!isOrderTeamPerson(assignedPerson, "supervisor")) throw new FormError("Select a valid supervisor from People");
       const contractValue = money(payload.contractValue);
       if (!contractValue) {
         return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
@@ -559,8 +567,8 @@ export async function POST(request: Request, context: RequestContext = { userRol
       if (!order) throw new FormError("Select a valid order"); if (!vendor) throw new FormError("Select a valid vendor");
       if (!product || product.vendorId !== vendorId) throw new FormError("Select a product listed by this vendor");
       if (userRole === "supervisor") {
-        const supervisorPerson = await findSupervisorPerson(collections, context);
-        if (!supervisorPerson) throw new FormError("Supervisor profile is not linked to a Person record");
+        const supervisorPerson = await findSessionPerson(collections, context);
+        if (!supervisorPerson) throw new FormError("Add an active People record with your name and Supervisor role");
         const ownedOrder = await collections.orders.findOne({ id: orderId, assignedPersonId: supervisorPerson.id, status: { $nin: ["Completed", "Cancelled"] } });
         if (!ownedOrder) throw new FormError("Supervisor actions require an active assigned order");
       }
@@ -670,10 +678,10 @@ export async function POST(request: Request, context: RequestContext = { userRol
       }
       let personId = clean(payload.personId);
       if (userRole === "supervisor") {
-        const supervisorPerson = await findSupervisorPerson(collections, context);
-        if (!supervisorPerson) throw new FormError("Supervisor profile is not linked to a Person record");
+        const supervisorPerson = await findSessionPerson(collections, context);
+        if (!supervisorPerson) throw new FormError("Add an active People record with your name and Supervisor role");
         if (personId && personId !== supervisorPerson.id) {
-          throw new FormError("Supervisor expenses are assigned to your linked Person record");
+          throw new FormError("Supervisor expenses are assigned to your People role automatically");
         }
         if (clean(payload.vendorId) || clean(payload.vendor)) {
           throw new FormError("Vendor or payee cannot be recorded on an expense");
@@ -778,7 +786,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
   }
 }
 
-export async function PATCH(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userEmail: "", teamAssignments: [] }) {
+export async function PATCH(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userName: "", userEmail: "" }) {
   try {
     const body = (await request.json()) as { type?: string; id?: string; payload?: Payload };
     const type = clean(body.type);
@@ -788,8 +796,8 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       return Response.json({ error: "Select a valid record to edit" }, { status: 400 });
     }
     const userRole = context.userRole;
-    if (type === "order" && !["admin", "supervisor"].includes(userRole)) {
-      return Response.json({ error: "Only an administrator or the assigned supervisor can edit orders" }, { status: 403 });
+    if (type === "order" && !["admin", "supervisor", "sales"].includes(userRole)) {
+      return Response.json({ error: "Only an administrator, assigned salesperson or assigned supervisor can edit orders" }, { status: 403 });
     }
     const requestedDirection = clean(payload.direction);
     const canEditPayment = requestedDirection === "Received"
@@ -875,7 +883,7 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       return Response.json({ record: { ...existingPayment, ...updates } });
     }
 
-    const missing = required(payload, userRole === "supervisor" ? ["eventDate"] : ["orderNo", "customerId", "salespersonId", "assignedPersonId", "eventDate"]);
+    const missing = required(payload, userRole === "supervisor" ? ["eventDate"] : userRole === "sales" ? ["orderNo", "customerId", "assignedPersonId", "eventDate"] : ["orderNo", "customerId", "salespersonId", "assignedPersonId", "eventDate"]);
     if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
     if (invalidDate(payload, ["eventDate"])) {
       return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
@@ -885,7 +893,8 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
     if (scheduleError) throw new FormError(scheduleError);
 
     const customerId = clean(payload.customerId);
-    const salespersonId = clean(payload.salespersonId);
+    const sessionPerson = userRole === "sales" ? await findSessionPerson(collections, context) : undefined;
+    const salespersonId = userRole === "sales" ? sessionPerson?.id ?? "" : clean(payload.salespersonId);
     const assignedPersonId = clean(payload.assignedPersonId);
     const [existingOrder, customer, salesperson, assignedPerson] = await Promise.all([
       findById(collections.orders, id),
@@ -895,8 +904,8 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
     ]);
     if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
     if (userRole === "supervisor") {
-      const supervisorPerson = await findSupervisorPerson(collections, context);
-      if (!supervisorPerson) throw new FormError("Supervisor profile is not linked to a Person record");
+      const supervisorPerson = await findSessionPerson(collections, context);
+      if (!supervisorPerson) throw new FormError("Add an active People record with your name and Supervisor role");
       if (existingOrder.assignedPersonId !== supervisorPerson.id || ["Completed", "Cancelled"].includes(existingOrder.status)) throw new FormError("Supervisor actions require an active assigned order");
       const updates = {
         title: clean(payload.title),
@@ -916,17 +925,29 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       await collections.orders.updateOne({ id }, { $set: updates });
       return Response.json({ record: { ...existingOrder, ...updates, salespersonId: existingOrder.salespersonId, assignedPersonId: existingOrder.assignedPersonId, contractValue: 0 } });
     }
+    if (userRole === "sales" && (!salespersonId || existingOrder.salespersonId !== salespersonId)) {
+      return Response.json({ error: "Salespeople can only edit orders assigned to their People role" }, { status: 403 });
+    }
     if (!customer) throw new FormError("Select a valid customer");
     if (!salesperson) throw new FormError("Select a valid salesperson from the team");
     if (!assignedPerson) throw new FormError("Select a valid supervisor from the team");
     if (salesperson.status !== "Active" || assignedPerson.status !== "Active") throw new FormError("Select active team members for the order");
-    if (!isOrderTeamPerson(salesperson, "salesperson", context.teamAssignments)) throw new FormError("Select a valid salesperson from the team");
-    if (!isOrderTeamPerson(assignedPerson, "supervisor", context.teamAssignments)) throw new FormError("Select a valid supervisor from the team");
+    if (!isOrderTeamPerson(salesperson, "salesperson")) throw new FormError("Select a valid salesperson from People");
+    if (!isOrderTeamPerson(assignedPerson, "supervisor")) throw new FormError("Select a valid supervisor from People");
     const contractValue = money(payload.contractValue);
     if (!contractValue) throw new FormError("Order value must be greater than zero");
     const products = orderProductInputs(payload);
     if (products.some((item) => !item.name || !item.quantity || !item.price)) {
       throw new FormError("Complete the product name, quantity and price for every product");
+    }
+    const assignments = userRole === "admin" ? vendorAssignments(payload) : [];
+    if (assignments.some((item) => !item.vendorId || !item.productName || !item.amount)) {
+      throw new FormError("Complete the vendor, product and amount for every assignment");
+    }
+    if (userRole === "admin") {
+      const uniqueVendorIds = [...new Set(assignments.map((item) => item.vendorId))];
+      const validVendorCount = uniqueVendorIds.length ? await collections.vendors.countDocuments({ id: { $in: uniqueVendorIds } }) : 0;
+      if (validVendorCount !== uniqueVendorIds.length) throw new FormError("Select valid vendors for the order");
     }
     const firstProduct = products[0];
 
@@ -956,12 +977,17 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       contractValue,
     };
     const productRows: OrderProduct[] = products.map((product) => ({ id: crypto.randomUUID(), orderId: id, ...product, amount: product.quantity * product.price, createdAt: now() }));
+    const assignmentRows: OrderVendor[] = assignments.map((assignment) => ({ id: crypto.randomUUID(), orderId: id, productId: "", productType: "Quantity-wise", pricingBasis: "Per event", unitRate: assignment.amount, quantity: 1, measurement: 1, rentalDays: 1, ...assignment, createdAt: now() }));
     const session = client.startSession();
     try {
       await session.withTransaction(async () => {
         await collections.orders.updateOne({ id }, { $set: updates }, { session });
         await collections.orderProducts.deleteMany({ orderId: id }, { session });
         if (productRows.length) await collections.orderProducts.insertMany(productRows, { session });
+        if (userRole === "admin") {
+          await collections.orderVendors.deleteMany({ orderId: id }, { session });
+          if (assignmentRows.length) await collections.orderVendors.insertMany(assignmentRows, { session });
+        }
       });
     } finally {
       await session.endSession();
@@ -977,7 +1003,7 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
   }
 }
 
-export async function DELETE(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userEmail: "", teamAssignments: [] }) {
+export async function DELETE(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userName: "", userEmail: "" }) {
   try {
     if (!["admin", "accountant"].includes(context.userRole)) return Response.json({ error: "Your role cannot delete vendor products" }, { status: 403 });
     const body = (await request.json()) as { type?: string; id?: string };

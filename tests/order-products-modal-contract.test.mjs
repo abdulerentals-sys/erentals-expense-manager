@@ -47,13 +47,14 @@ test("admin order create and update selectors do not require People email addres
     read("app/api/records/mongodb.ts"),
   ]);
 
-  assert.doesNotMatch(team, /person\.email/);
-  assert.match(dashboard, /All active People marked as salespeople or supervisors are listed; email and login access are not required/);
+  const eligibility = team.match(/export function isOrderTeamPerson[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.doesNotMatch(eligibility, /email|assignment|Team Access/);
+  assert.match(dashboard, /All active People with Sales or Supervisor roles are available directly/);
   assert.match(dashboard, /Salesperson \*[^]*TeamPersonSelect/);
   assert.match(dashboard, /Supervisor \*[^]*TeamPersonSelect/);
   for (const source of [sitesRoute, mongoRoute]) {
     assert.match(source, /salespersonId/);
     assert.match(source, /assignedPersonId/);
-    assert.match(source, /isOrderTeamPerson\(assignedPerson, "supervisor"/);
+    assert.match(source, /isOrderTeamPerson\(assignedPerson, "supervisor"\)/);
   }
 });

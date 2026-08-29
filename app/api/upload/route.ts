@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { canCreateRecord } from "../../auth/permissions";
 import { getSessionUser } from "../../auth/session";
+import { isSupportedOrderDocument, isSupportedReceiptDocument } from "../../upload-types";
 
 interface UploadBucket {
   put(key: string, body: ArrayBuffer, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
@@ -49,11 +50,9 @@ export async function POST(request: Request) {
     if (!(file instanceof File)) {
       return Response.json({ error: "Choose a supported document to upload" }, { status: 400 });
     }
-    const allowed = kind === "order"
-      ? ["application/pdf", "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/csv"]
-      : ["application/pdf", "image/jpeg", "image/png", "image/webp"];
-    if (!allowed.includes(file.type)) {
-      return Response.json({ error: kind === "order" ? "Only PDF, XLS, XLSX, and CSV files are accepted" : "Only PDF, JPG, PNG, and WebP files are accepted" }, { status: 400 });
+    const allowed = kind === "order" ? isSupportedOrderDocument(file.type) : isSupportedReceiptDocument(file.type);
+    if (!allowed) {
+      return Response.json({ error: kind === "order" ? "Only images, PDF, XLS, XLSX, and CSV files are accepted" : "Only images and PDF files are accepted" }, { status: 400 });
     }
     if (file.size > 10 * 1024 * 1024) {
       return Response.json({ error: "The file must be smaller than 10 MB" }, { status: 400 });

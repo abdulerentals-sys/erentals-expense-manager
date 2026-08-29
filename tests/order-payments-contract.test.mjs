@@ -31,7 +31,8 @@ test("payment directions and order edits are enforced by role", async () => {
   assert.match(permissions, /canRecordPayment/);
   assert.match(permissions, /sales[\s\S]*Received/);
   assert.match(sitesRoute, /export async function PATCH/);
-  assert.match(sitesRoute, /\["admin", "supervisor"\]\.includes\(user\.role\)/);
+  assert.match(sitesRoute, /\["admin", "supervisor", "sales"\]\.includes\(user\.role\)/);
+  assert.match(sitesRoute, /Salespeople can only edit orders assigned to their People role/);
   assert.match(mongoRoute, /export async function PATCH/);
 });
 

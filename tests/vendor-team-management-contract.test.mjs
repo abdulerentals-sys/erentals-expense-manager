@@ -43,7 +43,7 @@ test("vendor products support quantity, length and area calculations", async () 
   }
 });
 
-test("dashboard accounts link explicitly to People instead of requiring matching emails", async () => {
+test("dashboard accounts use roles without manual People links or matching emails", async () => {
   const [types, usersApi, usersUi, permissions, sitesRoute, mongoRoute] = await Promise.all([
     read("app/auth/types.ts"),
     read("app/api/users/route.ts"),
@@ -54,12 +54,12 @@ test("dashboard accounts link explicitly to People instead of requiring matching
   ]);
 
   assert.match(types, /personId: string/);
-  assert.match(usersApi, /personId/);
-  assert.match(usersUi, /Linked team member/);
-  assert.match(permissions, /userPersonId/);
+  assert.match(usersApi, /personId: ""/);
+  assert.doesNotMatch(usersUi, /Linked team member|Save link|name="personId"/);
+  assert.match(permissions, /resolveUserPersonId/);
   for (const source of [sitesRoute, mongoRoute]) {
     assert.doesNotMatch(source, /must be linked by email/);
-    assert.match(source, /userPersonId/);
+    assert.match(source, /resolveUserPersonId/);
   }
 });
 
