@@ -19,7 +19,7 @@ test("sales orders auto-assign the signed-in salesperson and only ask for a supe
   }
 });
 
-test("orders persist delivery, pickup, contact, optional products and attachment details", async () => {
+test("orders persist delivery, pickup schedule, contact, optional products and attachment details without a return venue field", async () => {
   const [dashboard, schema, ensure, sitesRoute, mongoRoute] = await Promise.all([
     read("app/components/ExpenseDashboard.tsx"),
     read("db/schema.ts"),
@@ -28,11 +28,17 @@ test("orders persist delivery, pickup, contact, optional products and attachment
     read("app/api/records/mongodb.ts"),
   ]);
 
-  for (const field of ["deliveryAddress", "deliveryDate", "deliveryTime", "pickupDate", "pickupTime", "pickupAddress", "contactPerson", "contactPhone", "attachmentKey", "attachmentName", "attachmentType"]) {
+  for (const field of ["deliveryAddress", "deliveryDate", "deliveryTime", "pickupDate", "pickupTime", "contactPerson", "contactPhone", "attachmentKey", "attachmentName", "attachmentType"]) {
     assert.match(dashboard, new RegExp(`name="${field}"|${field}:`));
     assert.match(schema, new RegExp(`${field}:`));
     assert.match(sitesRoute, new RegExp(`${field}: clean\\(payload\\.${field}\\)|${field}: money\\(payload\\.${field}\\)`));
     assert.match(mongoRoute, new RegExp(`${field}: clean\\(payload\\.${field}\\)|${field}: money\\(payload\\.${field}\\)`));
+  }
+  assert.doesNotMatch(dashboard, /name="pickupAddress"/);
+  assert.match(schema, /pickupAddress:/);
+  for (const source of [sitesRoute, mongoRoute]) {
+    assert.match(source, /pickupAddress: clean\(payload\.pickupAddress\)/);
+    assert.doesNotMatch(source, /\["deliveryAddress", "pickupAddress", "contactPerson", "contactPhone"\]/);
   }
   assert.match(dashboard, /name="products"/);
   assert.match(schema, /export const orderProducts/);

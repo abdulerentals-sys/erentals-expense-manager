@@ -221,7 +221,7 @@ function orderScheduleError(payload: Payload, pickupFromGodown: boolean) {
     return "Pickup date and time cannot be before delivery date and time";
   }
   if (!pickupFromGodown) {
-    const siteMissing = required(payload, ["deliveryAddress", "pickupAddress", "contactPerson", "contactPhone"]);
+    const siteMissing = required(payload, ["deliveryAddress", "contactPerson", "contactPhone"]);
     if (siteMissing) return `${siteMissing} is required unless pickup from godown is selected`;
   }
   return "";
