@@ -16,7 +16,8 @@ test("order titles are optional across the form and both storage APIs", async ()
   assert.doesNotMatch(dashboard, /name="title" required/);
   for (const source of [sitesRoute, mongoRoute]) {
     assert.doesNotMatch(source, /required\(payload, \["title", "customerId"/);
-    assert.match(source, /required\(payload, \["customerId", "assignedPersonId", "eventDate"\]\)/);
+    assert.match(source, /required\(payload, \["customerId", "eventDate"\]\)/);
+    assert.match(source, /Select at least one supervisor/);
   }
 });
 
@@ -33,7 +34,7 @@ test("new and updated orders persist a salesperson and supervisor from the team"
   assert.match(dashboard, /name="salespersonId"/);
   assert.match(dashboard, /name="assignedPersonId"/);
   assert.match(dashboard, /Salesperson \*/);
-  assert.match(dashboard, /Supervisor \*/);
+  assert.match(dashboard, /Supervisor\(s\) \*/);
   assert.match(dashboard, /editingOrder\?\.salespersonId/);
   assert.match(schema, /salespersonId: text\("salesperson_id"\)/);
   assert.match(ensure, /salesperson_id text DEFAULT '' NOT NULL/);
@@ -42,13 +43,13 @@ test("new and updated orders persist a salesperson and supervisor from the team"
   for (const source of [sitesRoute, mongoRoute]) {
     assert.match(source, /salespersonId/);
     assert.match(source, /Select a valid salesperson/);
-    assert.match(source, /Select a valid supervisor/);
+    assert.match(source, /Select valid supervisors/);
     assert.match(source, /Select active team members for the order/);
     assert.doesNotMatch(source, /must be linked by email/);
   }
 });
 
-test("supervisor ownership remains tied to the assigned supervisor after an admin update", async () => {
+test("supervisor ownership remains tied to every assigned supervisor after an admin update", async () => {
   const [permissions, dashboard, sitesRoute, mongoRoute] = await Promise.all([
     read("app/auth/permissions.ts"),
     read("app/components/ExpenseDashboard.tsx"),
@@ -56,11 +57,11 @@ test("supervisor ownership remains tied to the assigned supervisor after an admi
     read("app/api/records/mongodb.ts"),
   ]);
 
-  assert.match(permissions, /order\.assignedPersonId/);
-  assert.match(dashboard, /<small>Supervisor<\/small>/);
+  assert.match(permissions, /isOrderSupervisor\(order, currentPersonId\)/);
+  assert.match(dashboard, /<small>Supervisors<\/small>/);
   assert.match(dashboard, /<small>Salesperson<\/small>/);
   for (const source of [sitesRoute, mongoRoute]) {
-    assert.match(source, /existingOrder\.assignedPersonId/);
-    assert.match(source, /assignedPersonId: existingOrder\.assignedPersonId/);
+    assert.match(source, /isOrderSupervisor\(existingOrder/);
+    assert.match(source, /supervisorIds/);
   }
 });

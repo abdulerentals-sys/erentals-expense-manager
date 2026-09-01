@@ -51,10 +51,11 @@ test("admin order create and update selectors do not require People email addres
   assert.doesNotMatch(eligibility, /email|assignment|Team Access/);
   assert.match(dashboard, /All active People with Sales or Supervisor roles are available directly/);
   assert.match(dashboard, /Salesperson \*[^]*TeamPersonSelect/);
-  assert.match(dashboard, /Supervisor \*[^]*TeamPersonSelect/);
+  assert.match(dashboard, /Supervisor\(s\) \*[^]*TeamPersonMultiSelect/);
   for (const source of [sitesRoute, mongoRoute]) {
     assert.match(source, /salespersonId/);
     assert.match(source, /assignedPersonId/);
-    assert.match(source, /isOrderTeamPerson\(assignedPerson, "supervisor"\)/);
+    assert.match(source, /assignedSupervisors\.some/);
+    assert.match(source, /isOrderTeamPerson\(person!, "supervisor"\)/);
   }
 });

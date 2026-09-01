@@ -1,3 +1,5 @@
+import { isOrderSupervisor } from "./order-supervisors";
+
 export const EXPENSE_CATEGORIES = [
   "Material rental",
   "Fabrication",
@@ -11,6 +13,12 @@ export const EXPENSE_CATEGORIES = [
 
 export type ExpenseCategory = (typeof EXPENSE_CATEGORIES)[number];
 
+export function createExpenseNumber(date = new Date(), uniqueId = crypto.randomUUID()) {
+  const timestamp = date.toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
+  const suffix = uniqueId.replace(/[^a-z0-9]/gi, "").slice(0, 6).toUpperCase().padEnd(6, "0");
+  return `EXP-${timestamp}-${suffix}`;
+}
+
 type ExpensePerson = {
   id: string;
   role: string;
@@ -19,6 +27,7 @@ type ExpensePerson = {
 
 type ExpenseOrder = {
   assignedPersonId: string;
+  supervisorIds?: string[];
 };
 
 export function expenseCategoryKey(value: string) {
@@ -41,7 +50,7 @@ export function isExpenseResponsiblePerson(
 ) {
   if (!person || !order || person.status !== "Active") return false;
   const role = person.role.trim().toLowerCase();
-  return person.id === order.assignedPersonId
+  return isOrderSupervisor(order, person.id)
     || role.includes("sales")
     || role.includes("manager");
 }

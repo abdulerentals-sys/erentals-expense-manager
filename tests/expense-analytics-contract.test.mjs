@@ -41,7 +41,7 @@ test("expense dashboard supports period and order analysis with financial detail
 
   assert.match(dashboard, /expense\.expenseDate >= dateRange\.from/);
   assert.match(dashboard, /expense\.orderId === selectedOrderId/);
-  assert.match(supervisorAnalytics, /assignedPersonId/);
+  assert.match(supervisorAnalytics, /isOrderSupervisor\(order, person\.id\)/);
   assert.match(supervisorAnalytics, /role\.includes\("supervisor"\)/);
   assert.doesNotMatch(supervisorAnalytics, /execution manager/);
 });

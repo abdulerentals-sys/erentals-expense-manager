@@ -68,6 +68,7 @@ export const orders = sqliteTable("orders", {
   customerId: text("customer_id").notNull(),
   salespersonId: text("salesperson_id").notNull().default(""),
   assignedPersonId: text("assigned_person_id").notNull(),
+  supervisorIds: text("supervisor_ids", { mode: "json" }).$type<string[]>().notNull().default([]),
   venue: text("venue").notNull(),
   eventDate: text("event_date").notNull(),
   deliveryAddress: text("delivery_address").notNull().default(""),
