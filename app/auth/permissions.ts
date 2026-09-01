@@ -54,6 +54,10 @@ export function canCreateRecord(role: UserRole, type: string): type is RecordTyp
   return recordsByRole[role].includes(type as RecordType);
 }
 
+export function canEditCustomerProfile(role: UserRole) {
+  return ["admin", "accountant", "sales"].includes(role);
+}
+
 export function canRecordPayment(role: UserRole, direction: string): direction is PaymentDirection {
   if (direction === "Received") return ["admin", "accountant", "sales"].includes(role);
   if (direction === "Paid") return ["admin", "accountant"].includes(role);

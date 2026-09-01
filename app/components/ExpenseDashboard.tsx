@@ -4,7 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { canCreateRecord, canRecordPayment, canViewSection, roleLabels } from "../auth/permissions";
+import { canCreateRecord, canEditCustomerProfile, canRecordPayment, canViewSection, roleLabels } from "../auth/permissions";
 import { isOrderTeamPerson } from "../auth/team";
 import type { PublicUser } from "../auth/types";
 import { isSupportedOrderDocument, isSupportedReceiptDocument } from "../upload-types";
@@ -12,6 +12,7 @@ import { EXPENSE_CATEGORIES, isExpenseResponsiblePerson } from "../expense-rules
 import { calculateTentativeCost, isProductType, measurementLabel, productTypes, type PricingBasis, type ProductType } from "../vendor-pricing";
 import { adminDateRange, dateIsInRange, indiaDateKey, shiftDateKey, summarizeAdminOrders, type AdminPeriod } from "../admin-analytics";
 import { isOrderSupervisor, orderSupervisorIds } from "../order-supervisors";
+import { buildCustomerLedger, ledgerBalanceSide } from "../customer-ledger";
 
 type Customer = { id: string; name: string; businessName: string; phone: string; email: string; gstin: string; address: string; openingBalance: number; createdAt: string };
 type Person = { id: string; name: string; role: string; phone: string; email: string; paymentMode: string; status: string; orderId: string; createdAt: string };
@@ -144,9 +145,7 @@ export default function ExpenseDashboard({ initialSection, user }: { initialSect
     return { orderValue, received, expenses: expensesTotal, outstanding: Math.max(0, orderValue - received), profit: received - expensesTotal };
   }, [data]);
   const customerBalance = useCallback((customer: Customer) => {
-    const customerOrderValue = data.orders.filter((item) => item.customerId === customer.id).reduce((sum, item) => sum + item.contractValue, 0);
-    const receipts = data.payments.filter((item) => item.customerId === customer.id && item.direction === "Received").reduce((sum, item) => sum + item.amount, 0);
-    return customer.openingBalance + customerOrderValue - receipts;
+    return buildCustomerLedger(customer, data.orders, data.payments).summary.closingBalance;
   }, [data.orders, data.payments]);
   const filteredCustomers = data.customers.filter((item) => `${item.name} ${item.businessName} ${item.phone}`.toLowerCase().includes(search.toLowerCase()));
   const openModal = (kind: Exclude<ModalKind, null>) => {
@@ -157,7 +156,7 @@ export default function ExpenseDashboard({ initialSection, user }: { initialSect
     setFormError(""); setFile(null); setEditingCustomer(null); setEditingOrder(null); setEditingPayment(null); setEditingVendorProduct(null); setModal(kind);
   };
   const editCustomer = (customer: Customer) => {
-    if (!canCreateRecord(user.role, "customer")) {
+    if (!canEditCustomerProfile(user.role)) {
       setToast("Your role cannot edit customer profiles");
       return;
     }
@@ -461,7 +460,26 @@ function SettingsPage({ customCategories, saving, deletingId, onAdd, onDelete }:
 }
 
 function CustomersPage({ customers, customerBalance, openModal, viewCustomer, user }: { customers: Customer[]; customerBalance: (customer: Customer) => number; openModal: (kind: Exclude<ModalKind, null>) => void; viewCustomer: (customer: Customer) => void; user: PublicUser }) {
-  return <div className="section-stack"><PageHead copy={user.role === "supervisor" ? `${customers.length} customer profiles connected to your active assigned orders.` : `${customers.length} customer profiles with a complete order and payment trail.`} action={user.role !== "supervisor" ? <button className="btn btn-primary" onClick={() => openModal("customer")}>＋ Add customer</button> : undefined} />{customers.length ? <div className="panel table-panel"><div className={`data-table customer-table ${user.role === "supervisor" ? "supervisor-customer-table" : ""}`}><div className="table-row table-header"><span>Customer</span><span>Contact</span><span>GSTIN</span>{user.role !== "supervisor" && <><span>Receivable</span><span>Status</span></>}<span /></div>{customers.map((customer) => { const balance = customerBalance(customer); return <div className="table-row" key={customer.id}><div className="entity-cell"><span className="avatar mint">{initials(customerDisplayName(customer))}</span><div><strong>{customerDisplayName(customer)}</strong><small>{customerCompanyName(customer) || "Individual customer"}</small></div></div><div><strong>{customer.phone}</strong><small>{customer.email || "No email"}</small></div><span>{customer.gstin || "Not added"}</span>{user.role !== "supervisor" && <><strong className={balance > 0 ? "negative" : "positive"}>{balance < 0 ? `${fmt(Math.abs(balance))} advance` : fmt(balance)}</strong><Status value={balance > 0 ? "Payment due" : balance < 0 ? "Advance" : "Paid"} /></>}<button className="text-btn" onClick={() => viewCustomer(customer)}>View profile →</button></div>; })}</div></div> : user.role === "supervisor" ? <div className="mini-empty">No customer is linked to your active orders.</div> : <EmptyState title="Add your first customer" copy="Create a profile to connect orders and payments." action="Create customer" onClick={() => openModal("customer")} />}</div>;
+  const canManageCustomers = canEditCustomerProfile(user.role);
+  return <div className="section-stack">
+    <PageHead copy={user.role === "supervisor" ? `${customers.length} customer profiles connected to your active assigned orders.` : `${customers.length} customer profiles with a complete order and payment trail.`} action={canManageCustomers ? <button className="btn btn-primary" onClick={() => openModal("customer")}>＋ Add customer</button> : undefined} />
+    {customers.length ? <div className="panel table-panel"><div className={`data-table customer-table ${user.role === "supervisor" ? "supervisor-customer-table" : ""}`}>
+      <div className="table-row table-header"><span>Customer</span><span>Contact</span><span>GSTIN</span>{user.role !== "supervisor" && <><span>Receivable</span><span>Status</span></>}<span /></div>
+      {customers.map((customer) => {
+        const balance = customerBalance(customer);
+        return <div className="table-row" key={customer.id}>
+          <button type="button" className="customer-profile-link entity-cell" onClick={() => viewCustomer(customer)} aria-label={`Open ledger for ${customerDisplayName(customer)}`}>
+            <span className="avatar mint">{initials(customerDisplayName(customer))}</span>
+            <span><strong>{customerDisplayName(customer)}</strong><small>{customerCompanyName(customer) || "Individual customer"}</small></span>
+          </button>
+          <div><strong>{customer.phone}</strong><small>{customer.email || "No email"}</small></div>
+          <span>{customer.gstin || "Not added"}</span>
+          {user.role !== "supervisor" && <><strong className={balance > 0 ? "negative" : "positive"}>{balance < 0 ? `${fmt(Math.abs(balance))} advance` : fmt(balance)}</strong><Status value={balance > 0 ? "Payment due" : balance < 0 ? "Advance" : "Paid"} /></>}
+          <button className="text-btn" onClick={() => viewCustomer(customer)}>View profile →</button>
+        </div>;
+      })}
+    </div></div> : user.role === "supervisor" ? <div className="mini-empty">No customer is linked to your active orders.</div> : <EmptyState title="Add your first customer" copy="Create a profile to connect orders and payments." action="Create customer" onClick={() => openModal("customer")} />}
+  </div>;
 }
 
 function PersonsPage({ persons, orders, expenses, openModal, user }: { persons: Person[]; orders: Order[]; expenses: Expense[]; openModal: (kind: Exclude<ModalKind, null>) => void; user: PublicUser }) {
@@ -601,7 +619,7 @@ function spreadsheetWorksheet(name: string, rows: SpreadsheetValue[][]) {
   return `<Worksheet ss:Name="${xmlValue(name)}"><Table>${rows.map((row, rowIndex) => `<Row>${row.map((value) => `<Cell${rowIndex === 0 ? ' ss:StyleID="Header"' : ""}><Data ss:Type="${typeof value === "number" ? "Number" : "String"}">${xmlValue(value)}</Data></Cell>`).join("")}</Row>`).join("")}</Table></Worksheet>`;
 }
 
-function downloadExpenseSpreadsheet(sheets: Array<{ name: string; rows: SpreadsheetValue[][] }>, fileName: string) {
+function downloadSpreadsheetWorkbook(sheets: Array<{ name: string; rows: SpreadsheetValue[][] }>, fileName: string) {
   const workbook = `<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Styles><Style ss:ID="Default"><Alignment ss:Vertical="Center"/><Font ss:FontName="Calibri" ss:Size="11"/></Style><Style ss:ID="Header"><Font ss:Bold="1" ss:Color="#FFFFFF"/><Interior ss:Color="#176B50" ss:Pattern="Solid"/></Style></Styles>${sheets.map((sheet) => spreadsheetWorksheet(sheet.name, sheet.rows)).join("")}</Workbook>`;
   const url = URL.createObjectURL(new Blob([workbook], { type: "application/vnd.ms-excel" }));
   const anchor = document.createElement("a");
@@ -716,7 +734,7 @@ function ExpensesPage({ data, user, openModal }: { data: AppData; user: PublicUs
       ["Delivery", `${selectedOrder.deliveryDate || selectedOrder.eventDate} ${selectedOrder.deliveryTime || ""}`.trim()],
       ["Pickup", `${selectedOrder.pickupDate || ""} ${selectedOrder.pickupTime || ""}`.trim()],
     ] });
-    downloadExpenseSpreadsheet(sheets, `expense-report-${dateRange.from}-to-${dateRange.to}.xls`);
+    downloadSpreadsheetWorkbook(sheets, `expense-report-${dateRange.from}-to-${dateRange.to}.xls`);
   };
 
   return <div className="section-stack expense-dashboard"><PageHead copy={`${filteredExpenses.length} expense records · ${fmt(total)} for ${dateRange.label.toLowerCase()}.`} action={<button className="btn btn-primary" onClick={() => openModal("expense")}>＋ Add expense</button>} secondary={<button className="btn btn-secondary" onClick={exportFilteredExpenses}>⇩ Export Excel</button>} />
@@ -745,12 +763,56 @@ function SupervisorHistoryPage({ orders, customers }: { orders: Order[]; custome
 }
 
 function CustomerDrawer({ customer, data, user, onEdit, onClose }: { customer: Customer; data: AppData; user: PublicUser; onEdit: () => void; onClose: () => void }) {
+  const canManageCustomer = canEditCustomerProfile(user.role);
   const customerOrders = data.orders.filter((item) => item.customerId === customer.id);
-  const customerOrderValue = customerOrders.reduce((sum, item) => sum + item.contractValue, 0);
-  const customerReceipts = data.payments.filter((item) => item.customerId === customer.id && item.direction === "Received");
-  const received = customerReceipts.reduce((sum, item) => sum + item.amount, 0);
-  const due = customer.openingBalance + customerOrderValue - received;
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="customer-drawer" role="dialog" aria-modal="true" aria-label="Customer profile"><button className="modal-close" onClick={onClose} aria-label="Close">×</button><div className="profile-hero"><span className="avatar profile-avatar">{initials(customerDisplayName(customer))}</span><h2>{customerDisplayName(customer)}</h2>{customerCompanyName(customer) && <p>{customerCompanyName(customer)}</p>}{user.role !== "supervisor" && <><Status value={due > 0 ? "Payment due" : due < 0 ? "Advance" : "Paid"} /><button type="button" className="btn btn-secondary btn-small" onClick={onEdit}>Edit customer</button></>}</div>{user.role !== "supervisor" && <div className="profile-balance"><span>{due >= 0 ? "Total receivable" : "Customer advance"}</span><strong>{fmt(Math.abs(due))}</strong></div>}<div className="profile-details"><div><span>Company</span><strong>{customerCompanyName(customer) || "Not added"}</strong></div><div><span>Phone</span><strong>{customer.phone}</strong></div><div><span>Email</span><strong>{customer.email || "Not added"}</strong></div><div><span>GSTIN</span><strong>{customer.gstin || "Not added"}</strong></div><div><span>Address</span><strong>{customer.address || "Not added"}</strong></div></div>{user.role !== "supervisor" && <div className="drawer-section"><h3>Customer activity</h3><div className="profile-stats"><div><strong>{customerOrders.length}</strong><span>Orders</span></div><div><strong>{fmt(customerOrderValue)}</strong><span>Order value</span></div><div><strong>{fmt(received)}</strong><span>Received</span></div></div></div>}</aside></div>;
+  const ledger = buildCustomerLedger(customer, data.orders, data.payments);
+  const due = ledger.summary.closingBalance;
+  const downloadCustomerLedger = () => {
+    const balanceSide = ledgerBalanceSide(ledger.summary.closingBalance) || "Settled";
+    const summaryRows: SpreadsheetValue[][] = [
+      ["Customer account ledger", "Value"],
+      ["Customer", customerDisplayName(customer)],
+      ["Company", customerCompanyName(customer)],
+      ["Phone", customer.phone],
+      ["Email", customer.email],
+      ["GSTIN", customer.gstin],
+      ["Address", customer.address],
+      ["Opening balance", Math.abs(ledger.summary.openingBalance)],
+      ["Opening balance side", ledgerBalanceSide(ledger.summary.openingBalance) || "Settled"],
+      ["Order value", ledger.summary.orderValue],
+      ["Payments received", ledger.summary.received],
+      ["Closing balance", Math.abs(ledger.summary.closingBalance)],
+      ["Closing balance side", balanceSide],
+      ["Downloaded on", today()],
+    ];
+    const ledgerRows: SpreadsheetValue[][] = [
+      ["Date", "Particulars", "Vch Type", "Vch No.", "Debit", "Credit", "Running Balance", "Dr / Cr"],
+      ...ledger.entries.map((entry) => [entry.date, entry.particulars, entry.voucherType, entry.voucherNo, entry.debit || "", entry.credit || "", Math.abs(entry.balance), ledgerBalanceSide(entry.balance)]),
+    ];
+    const fileKey = customerDisplayName(customer).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "customer";
+    downloadSpreadsheetWorkbook([
+      { name: "Account summary", rows: summaryRows },
+      { name: "Ledger", rows: ledgerRows },
+    ], `customer-ledger-${fileKey}-${today()}.xls`);
+  };
+
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <aside className={`customer-drawer ${canManageCustomer ? "customer-ledger-drawer" : ""}`} role="dialog" aria-modal="true" aria-label="Customer profile">
+      <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
+      <div className="profile-hero">
+        <span className="avatar profile-avatar">{initials(customerDisplayName(customer))}</span>
+        <h2>{customerDisplayName(customer)}</h2>
+        {customerCompanyName(customer) && <p>{customerCompanyName(customer)}</p>}
+        {canManageCustomer && <><Status value={due > 0 ? "Payment due" : due < 0 ? "Advance" : "Paid"} /><div className="profile-actions"><button type="button" className="btn btn-secondary btn-small" onClick={onEdit}>Edit customer</button><button type="button" className="btn btn-primary btn-small" onClick={downloadCustomerLedger}>⇩ Download ledger</button></div></>}
+      </div>
+      {canManageCustomer && <div className="profile-balance"><span>{due >= 0 ? "Closing receivable" : "Customer advance"}</span><strong>{fmt(Math.abs(due))} {ledgerBalanceSide(due)}</strong></div>}
+      <div className="profile-details"><div><span>Company</span><strong>{customerCompanyName(customer) || "Not added"}</strong></div><div><span>Phone</span><strong>{customer.phone}</strong></div><div><span>Email</span><strong>{customer.email || "Not added"}</strong></div><div><span>GSTIN</span><strong>{customer.gstin || "Not added"}</strong></div><div><span>Address</span><strong>{customer.address || "Not added"}</strong></div></div>
+      {canManageCustomer && <>
+        <div className="drawer-section"><h3>Customer activity</h3><div className="ledger-summary-grid"><div><strong>{customerOrders.length}</strong><span>Orders</span></div><div><strong>{fmt(ledger.summary.orderValue)}</strong><span>Order value</span></div><div><strong>{fmt(ledger.summary.received)}</strong><span>Received</span></div><div><strong>{fmt(Math.abs(due))} {ledgerBalanceSide(due)}</strong><span>Closing balance</span></div></div></div>
+        <div className="drawer-section customer-ledger-section"><div className="drawer-section-head"><div><span className="overline">Tally-style statement</span><h3>Account ledger</h3></div><button type="button" className="text-btn" onClick={downloadCustomerLedger}>Download ledger</button></div><p>Order amounts are debits, customer payments are credits, and the balance runs by transaction date.</p><div className="customer-ledger-scroll"><table className="customer-ledger-table"><thead><tr><th>Date</th><th>Particulars</th><th>Vch type</th><th>Vch no.</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead><tbody>{ledger.entries.map((entry) => <tr key={entry.id}><td>{shortDate(entry.date)}</td><td><strong>{entry.particulars}</strong></td><td>{entry.voucherType}</td><td>{entry.voucherNo || "—"}</td><td className="ledger-number">{entry.debit ? fmt(entry.debit) : "—"}</td><td className="ledger-number positive">{entry.credit ? fmt(entry.credit) : "—"}</td><td className={`ledger-number ${entry.balance > 0 ? "negative" : entry.balance < 0 ? "positive" : ""}`}>{fmt(Math.abs(entry.balance))} {ledgerBalanceSide(entry.balance)}</td></tr>)}{!ledger.entries.length && <tr><td colSpan={7} className="ledger-empty">No opening balance, orders, or customer payments have been recorded.</td></tr>}</tbody></table></div></div>
+      </>}
+    </aside>
+  </div>;
 }
 
 function OrderTransactionHistory({ order, data, customerById, personById, vendorById, user, onClose }: { order: Order; data: AppData; customerById: (id: string) => Customer | undefined; personById: (id: string) => Person | undefined; vendorById: (id: string) => Vendor | undefined; user: PublicUser; onClose: () => void }) {

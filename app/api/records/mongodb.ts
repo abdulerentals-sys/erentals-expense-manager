@@ -5,6 +5,7 @@ import {
   type Collection,
   type Filter,
 } from "mongodb";
+import { canEditCustomerProfile } from "../../auth/permissions";
 import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
 import { createExpenseNumber, expenseCategoryKey, isAllowedExpenseCategory, isBuiltInExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
@@ -837,7 +838,7 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
     if (type === "vendorProduct" && !["admin", "accountant"].includes(userRole)) {
       return Response.json({ error: "Your role cannot edit vendor products" }, { status: 403 });
     }
-    if (type === "customer" && !["admin", "accountant", "sales"].includes(userRole)) {
+    if (type === "customer" && !canEditCustomerProfile(userRole)) {
       return Response.json({ error: "Your role cannot edit customer profiles" }, { status: 403 });
     }
 

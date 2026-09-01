@@ -1,5 +1,5 @@
 import { and, desc, eq, ne } from "drizzle-orm";
-import { canCreateRecord, canRecordPayment, filterRecordData } from "../../auth/permissions";
+import { canCreateRecord, canEditCustomerProfile, canRecordPayment, filterRecordData } from "../../auth/permissions";
 import { getSessionUser } from "../../auth/session";
 import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
@@ -671,7 +671,7 @@ export async function PATCH(request: Request) {
   if (type === "vendorProduct" && !canCreateRecord(user.role, "vendorProduct")) {
     return Response.json({ error: "Your role cannot edit vendor products" }, { status: 403 });
   }
-  if (type === "customer" && !canCreateRecord(user.role, "customer")) {
+  if (type === "customer" && !canEditCustomerProfile(user.role)) {
     return Response.json({ error: "Your role cannot edit customer profiles" }, { status: 403 });
   }
   if (usesNetlifyStorage()) {
