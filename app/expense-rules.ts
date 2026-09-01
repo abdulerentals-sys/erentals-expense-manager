@@ -1,3 +1,5 @@
+import { isOrderSupervisor } from "./order-supervisors";
+
 export const EXPENSE_CATEGORIES = [
   "Material rental",
   "Fabrication",
@@ -25,6 +27,7 @@ type ExpensePerson = {
 
 type ExpenseOrder = {
   assignedPersonId: string;
+  supervisorIds?: string[];
 };
 
 export function expenseCategoryKey(value: string) {
@@ -47,7 +50,7 @@ export function isExpenseResponsiblePerson(
 ) {
   if (!person || !order || person.status !== "Active") return false;
   const role = person.role.trim().toLowerCase();
-  return person.id === order.assignedPersonId
+  return isOrderSupervisor(order, person.id)
     || role.includes("sales")
     || role.includes("manager");
 }

@@ -4,6 +4,7 @@ import { getSessionUser } from "../../auth/session";
 import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
 import { createExpenseNumber, expenseCategoryKey, isAllowedExpenseCategory, isBuiltInExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
+import { isOrderSupervisor, normalizeSupervisorIds } from "../../order-supervisors";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis } from "../../vendor-pricing";
 import { getDb } from "../../../db";
 import { ensureSchema } from "../../../db/ensure";
@@ -249,8 +250,8 @@ export async function POST(request: Request) {
       if (user.role === "supervisor") {
         const supervisorPerson = await findSessionPerson(db, user);
         if (!supervisorPerson) return Response.json({ error: "Add an active People record with your name and Supervisor role" }, { status: 400 });
-        const [ownedOrder] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.id, orderId), eq(orders.assignedPersonId, supervisorPerson.id), ne(orders.status, "Completed"), ne(orders.status, "Cancelled"))).limit(1);
-        if (!ownedOrder) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
+        const [ownedOrder] = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+        if (!ownedOrder || !isOrderSupervisor(ownedOrder, supervisorPerson.id) || ["Completed", "Cancelled"].includes(ownedOrder.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       }
       const row = {
         id: crypto.randomUUID(),
@@ -310,7 +311,7 @@ export async function POST(request: Request) {
     }
 
     if (type === "order") {
-      const missing = required(payload, ["customerId", "assignedPersonId", "eventDate"]);
+      const missing = required(payload, ["customerId", "eventDate"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       if (invalidDate(payload, ["eventDate"])) {
         return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
@@ -319,23 +320,28 @@ export async function POST(request: Request) {
       const userRole = user.role;
       const sessionPerson = userRole === "sales" ? await findSessionPerson(db, user) : undefined;
       const salespersonId = userRole === "sales" ? sessionPerson?.id ?? "" : clean(payload.salespersonId);
-      const assignedPersonId = clean(payload.assignedPersonId);
+      const supervisorIds = normalizeSupervisorIds(payload.supervisorIds ?? payload.assignedPersonId);
+      if (!supervisorIds.length) return Response.json({ error: "Select at least one supervisor" }, { status: 400 });
+      const assignedPersonId = supervisorIds[0];
       if (!salespersonId && userRole === "sales") return Response.json({ error: "Add an active People record with your name and Sales person role" }, { status: 400 });
       if (!salespersonId) return Response.json({ error: "salespersonId is required" }, { status: 400 });
       const pickupFromGodown = asBoolean(payload.pickupFromGodown);
       const scheduleError = orderScheduleError(payload, pickupFromGodown);
       if (scheduleError) return Response.json({ error: scheduleError }, { status: 400 });
-      const [[customer], [salesperson], [assignedPerson]] = await Promise.all([
+      const [[customer], [salesperson], assignedSupervisors] = await Promise.all([
         db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1),
         db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, salespersonId)).limit(1),
-        db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
+        Promise.all(supervisorIds.map(async (supervisorId) => {
+          const [person] = await db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, supervisorId)).limit(1);
+          return person;
+        })),
       ]);
       if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
       if (!salesperson) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
-      if (!assignedPerson) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
-      if (salesperson.status !== "Active" || assignedPerson.status !== "Active") return Response.json({ error: "Select active team members for the order" }, { status: 400 });
+      if (assignedSupervisors.some((person) => !person)) return Response.json({ error: "Select valid supervisors from the team" }, { status: 400 });
+      if (salesperson.status !== "Active" || assignedSupervisors.some((person) => person?.status !== "Active")) return Response.json({ error: "Select active team members for the order" }, { status: 400 });
       if (!isOrderTeamPerson(salesperson, "salesperson")) return Response.json({ error: "Select a valid salesperson from People" }, { status: 400 });
-      if (!isOrderTeamPerson(assignedPerson, "supervisor")) return Response.json({ error: "Select a valid supervisor from People" }, { status: 400 });
+      if (assignedSupervisors.some((person) => !isOrderTeamPerson(person!, "supervisor"))) return Response.json({ error: "Select valid supervisors from People" }, { status: 400 });
       const contractValue = money(payload.contractValue);
       if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
       const advancePayment = money(payload.advancePayment);
@@ -355,6 +361,7 @@ export async function POST(request: Request) {
         customerId,
         salespersonId,
         assignedPersonId,
+        supervisorIds,
         venue: clean(payload.venue),
         eventDate: clean(payload.eventDate),
         deliveryAddress: clean(payload.deliveryAddress),
@@ -426,7 +433,7 @@ export async function POST(request: Request) {
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
       const orderId = clean(payload.orderId); const vendorId = clean(payload.vendorId); const productId = clean(payload.productId);
       const [[order], [vendor], [product]] = await Promise.all([
-        db.select({ id: orders.id }).from(orders).where(eq(orders.id, orderId)).limit(1),
+        db.select().from(orders).where(eq(orders.id, orderId)).limit(1),
         db.select({ id: vendors.id }).from(vendors).where(eq(vendors.id, vendorId)).limit(1),
         db.select().from(vendorProducts).where(eq(vendorProducts.id, productId)).limit(1),
       ]);
@@ -436,8 +443,7 @@ export async function POST(request: Request) {
       if (user.role === "supervisor") {
         const supervisorPerson = await findSessionPerson(db, user);
         if (!supervisorPerson) return Response.json({ error: "Add an active People record with your name and Supervisor role" }, { status: 400 });
-        const [ownedOrder] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.id, orderId), eq(orders.assignedPersonId, supervisorPerson.id), ne(orders.status, "Completed"), ne(orders.status, "Cancelled"))).limit(1);
-        if (!ownedOrder) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
+        if (!isOrderSupervisor(order, supervisorPerson.id) || ["Completed", "Cancelled"].includes(order.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       }
       const productType = isProductType(product.productType) ? product.productType : "Quantity-wise";
       const measurement = normalizeMeasurement(payload.measurement ?? payload.quantity, productType);
@@ -536,18 +542,18 @@ export async function POST(request: Request) {
         if (clean(payload.vendorId) || clean(payload.vendor)) {
           return Response.json({ error: "Vendor or payee cannot be recorded on an expense" }, { status: 400 });
         }
-        const [ownedOrder] = await db.select({ id: orders.id }).from(orders).where(and(eq(orders.id, orderId), eq(orders.assignedPersonId, supervisorPerson.id), ne(orders.status, "Completed"), ne(orders.status, "Cancelled"))).limit(1);
-        if (!ownedOrder) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
+        const [ownedOrder] = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+        if (!ownedOrder || !isOrderSupervisor(ownedOrder, supervisorPerson.id) || ["Completed", "Cancelled"].includes(ownedOrder.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
         personId = supervisorPerson.id;
       }
       const [[order], [person]] = await Promise.all([
-        db.select({ id: orders.id, assignedPersonId: orders.assignedPersonId }).from(orders).where(eq(orders.id, orderId)).limit(1),
+        db.select().from(orders).where(eq(orders.id, orderId)).limit(1),
         db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, personId)).limit(1),
       ]);
       if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
       if (!person) return Response.json({ error: "Select a valid responsible person" }, { status: 400 });
       if (user.role !== "supervisor" && !isExpenseResponsiblePerson(person, order)) {
-        return Response.json({ error: "Responsible person must be an active salesperson, this order's assigned supervisor, or an active manager" }, { status: 400 });
+        return Response.json({ error: "Responsible person must be an active salesperson, one of this order's assigned supervisors, or an active manager" }, { status: 400 });
       }
       const amount = money(payload.amount);
       if (!amount) return Response.json({ error: "Expense amount must be greater than zero" }, { status: 400 });
@@ -568,7 +574,7 @@ export async function POST(request: Request) {
         createdAt,
       };
       await db.insert(expenses).values(row);
-      return Response.json({ record: row }, { status: 201 });
+      return Response.json({ record: { ...row, expenseNo: "" } }, { status: 201 });
     }
 
     if (type === "payment") {
@@ -653,7 +659,7 @@ export async function PATCH(request: Request) {
   const type = clean(body.type);
   const id = clean(body.id);
   const payload = body.payload ?? {};
-  if (!id || !["order", "payment", "vendorProduct"].includes(type)) {
+  if (!id || !["customer", "order", "payment", "vendorProduct"].includes(type)) {
     return Response.json({ error: "Select a valid record to edit" }, { status: 400 });
   }
   if (type === "order" && !["admin", "supervisor", "sales"].includes(user.role)) {
@@ -665,6 +671,9 @@ export async function PATCH(request: Request) {
   if (type === "vendorProduct" && !canCreateRecord(user.role, "vendorProduct")) {
     return Response.json({ error: "Your role cannot edit vendor products" }, { status: 403 });
   }
+  if (type === "customer" && !canCreateRecord(user.role, "customer")) {
+    return Response.json({ error: "Your role cannot edit customer profiles" }, { status: 403 });
+  }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
     return mongodb.PATCH(request, { userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
@@ -673,6 +682,24 @@ export async function PATCH(request: Request) {
   try {
     await ensureSchema();
     const db = getDb();
+
+    if (type === "customer") {
+      const missing = required(payload, ["name", "phone"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      const [existingCustomer] = await db.select().from(customers).where(eq(customers.id, id)).limit(1);
+      if (!existingCustomer) return Response.json({ error: "Customer not found" }, { status: 404 });
+      const updates = {
+        name: clean(payload.name),
+        businessName: clean(payload.businessName),
+        phone: clean(payload.phone),
+        email: clean(payload.email).toLowerCase(),
+        gstin: clean(payload.gstin),
+        address: clean(payload.address),
+        openingBalance: Math.round(Number(payload.openingBalance) || 0),
+      };
+      await db.update(customers).set(updates).where(eq(customers.id, id));
+      return Response.json({ record: { ...existingCustomer, ...updates } });
+    }
 
     if (type === "vendorProduct") {
       const missing = required(payload, ["vendorId", "name", "productType", "pricingBasis", "rentalCharge"]);
@@ -745,7 +772,7 @@ export async function PATCH(request: Request) {
       return Response.json({ record: { ...existingPayment, ...updates } });
     }
 
-    const missing = required(payload, user.role === "supervisor" ? ["eventDate"] : user.role === "sales" ? ["orderNo", "customerId", "assignedPersonId", "eventDate"] : ["orderNo", "customerId", "salespersonId", "assignedPersonId", "eventDate"]);
+    const missing = required(payload, user.role === "supervisor" ? ["eventDate"] : user.role === "sales" ? ["orderNo", "customerId", "eventDate"] : ["orderNo", "customerId", "salespersonId", "eventDate"]);
     if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
     if (invalidDate(payload, ["eventDate"])) {
       return Response.json({ error: "Enter a valid event or delivery date" }, { status: 400 });
@@ -757,12 +784,16 @@ export async function PATCH(request: Request) {
     const customerId = clean(payload.customerId);
     const sessionPerson = user.role === "sales" ? await findSessionPerson(db, user) : undefined;
     const salespersonId = user.role === "sales" ? sessionPerson?.id ?? "" : clean(payload.salespersonId);
-    const assignedPersonId = clean(payload.assignedPersonId);
-    const [[existingOrder], [customer], [salesperson], [assignedPerson]] = await Promise.all([
+    const supervisorIds = normalizeSupervisorIds(payload.supervisorIds ?? payload.assignedPersonId);
+    const assignedPersonId = supervisorIds[0] || "";
+    const [[existingOrder], [customer], [salesperson], assignedSupervisors] = await Promise.all([
       db.select().from(orders).where(eq(orders.id, id)).limit(1),
       db.select({ id: customers.id }).from(customers).where(eq(customers.id, customerId)).limit(1),
       db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, salespersonId)).limit(1),
-      db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
+      Promise.all(supervisorIds.map(async (supervisorId) => {
+        const [person] = await db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, supervisorId)).limit(1);
+        return person;
+      })),
     ]);
     if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
     if (existingOrder.status === "Completed" && user.role !== "admin") {
@@ -771,7 +802,7 @@ export async function PATCH(request: Request) {
     if (user.role === "supervisor") {
       const supervisorPerson = await findSessionPerson(db, user);
       if (!supervisorPerson) return Response.json({ error: "Add an active People record with your name and Supervisor role" }, { status: 400 });
-      if (existingOrder.assignedPersonId !== supervisorPerson.id || ["Completed", "Cancelled"].includes(existingOrder.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
+      if (!isOrderSupervisor(existingOrder, supervisorPerson.id) || ["Completed", "Cancelled"].includes(existingOrder.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       const updates = {
         title: clean(payload.title),
         venue: clean(payload.venue),
@@ -788,17 +819,18 @@ export async function PATCH(request: Request) {
         status: clean(payload.status) || existingOrder.status,
       };
       await db.update(orders).set(updates).where(eq(orders.id, id));
-      return Response.json({ record: { ...existingOrder, ...updates, salespersonId: existingOrder.salespersonId, assignedPersonId: existingOrder.assignedPersonId, contractValue: 0 } });
+      return Response.json({ record: { ...existingOrder, ...updates, salespersonId: existingOrder.salespersonId, assignedPersonId: existingOrder.assignedPersonId, supervisorIds: existingOrder.supervisorIds, contractValue: 0 } });
     }
     if (user.role === "sales" && (!salespersonId || existingOrder.salespersonId !== salespersonId)) {
       return Response.json({ error: "Salespeople can only edit orders assigned to their People role" }, { status: 403 });
     }
     if (!customer) return Response.json({ error: "Select a valid customer" }, { status: 400 });
     if (!salesperson) return Response.json({ error: "Select a valid salesperson from the team" }, { status: 400 });
-    if (!assignedPerson) return Response.json({ error: "Select a valid supervisor from the team" }, { status: 400 });
-    if (salesperson.status !== "Active" || assignedPerson.status !== "Active") return Response.json({ error: "Select active team members for the order" }, { status: 400 });
+    if (!supervisorIds.length) return Response.json({ error: "Select at least one supervisor" }, { status: 400 });
+    if (assignedSupervisors.some((person) => !person)) return Response.json({ error: "Select valid supervisors from the team" }, { status: 400 });
+    if (salesperson.status !== "Active" || assignedSupervisors.some((person) => person?.status !== "Active")) return Response.json({ error: "Select active team members for the order" }, { status: 400 });
     if (!isOrderTeamPerson(salesperson, "salesperson")) return Response.json({ error: "Select a valid salesperson from People" }, { status: 400 });
-    if (!isOrderTeamPerson(assignedPerson, "supervisor")) return Response.json({ error: "Select a valid supervisor from People" }, { status: 400 });
+    if (assignedSupervisors.some((person) => !isOrderTeamPerson(person!, "supervisor"))) return Response.json({ error: "Select valid supervisors from People" }, { status: 400 });
     const contractValue = money(payload.contractValue);
     if (!contractValue) return Response.json({ error: "Order value must be greater than zero" }, { status: 400 });
     const products = orderProductInputs(payload);
@@ -825,6 +857,7 @@ export async function PATCH(request: Request) {
       customerId,
       salespersonId,
       assignedPersonId,
+      supervisorIds,
       venue: clean(payload.venue),
       eventDate: clean(payload.eventDate),
       deliveryAddress: clean(payload.deliveryAddress),

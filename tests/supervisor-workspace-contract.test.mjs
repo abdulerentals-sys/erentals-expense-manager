@@ -7,8 +7,11 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
 async function loadPermissions() {
   const team = await read("app/auth/team.ts");
-  const permissions = (await read("app/auth/permissions.ts")).replace('import { resolveUserPersonId } from "./team";\n', "");
-  const source = `${team}\n${permissions}`;
+  const supervisors = await read("app/order-supervisors.ts");
+  const permissions = (await read("app/auth/permissions.ts"))
+    .replace('import { resolveUserPersonId } from "./team";\n', "")
+    .replace('import { isOrderSupervisor, orderSupervisorIds } from "../order-supervisors";\n', "");
+  const source = `${team}\n${supervisors}\n${permissions}`;
   const output = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   }).outputText;
@@ -39,10 +42,13 @@ test("supervisor records never expose legacy invoices or their attachment keys",
   };
   const data = {
     customers: [],
-    persons: [{ id: "supervisor-1", name: "Supervisor", role: "Supervisor", status: "Active", email: "supervisor@example.com" }],
+    persons: [
+      { id: "supervisor-1", name: "Supervisor", role: "Supervisor", status: "Active", email: "supervisor@example.com" },
+      { id: "supervisor-2", name: "Co-supervisor", role: "Supervisor", status: "Active", email: "co-supervisor@example.com" },
+    ],
     vendors: [],
     vendorProducts: [],
-    orders: [{ id: "order-1", assignedPersonId: "supervisor-1", status: "In progress", customerId: "customer-1" }],
+    orders: [{ id: "order-1", assignedPersonId: "supervisor-1", supervisorIds: ["supervisor-1", "supervisor-2"], status: "In progress", customerId: "customer-1" }],
     orderProducts: [],
     orderVendors: [],
     invoices: [invoice],
@@ -53,6 +59,7 @@ test("supervisor records never expose legacy invoices or their attachment keys",
   const supervisorData = filterRecordData(data, "supervisor", "supervisor-1", "Supervisor", "supervisor@example.com");
   assert.deepEqual(supervisorData.invoices, []);
   assert.equal(JSON.stringify(supervisorData).includes(invoice.attachmentKey), false);
+  assert.deepEqual(supervisorData.persons.map((person) => person.id), ["supervisor-1", "supervisor-2"]);
 
   assert.strictEqual(filterRecordData(data, "admin"), data);
   assert.strictEqual(filterRecordData(data, "accountant"), data);

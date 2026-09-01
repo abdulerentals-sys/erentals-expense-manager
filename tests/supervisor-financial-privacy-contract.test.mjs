@@ -7,8 +7,11 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
 async function loadPermissions() {
   const team = await read("app/auth/team.ts");
-  const permissions = (await read("app/auth/permissions.ts")).replace('import { resolveUserPersonId } from "./team";\n', "");
-  const source = `${team}\n${permissions}`;
+  const supervisors = await read("app/order-supervisors.ts");
+  const permissions = (await read("app/auth/permissions.ts"))
+    .replace('import { resolveUserPersonId } from "./team";\n', "")
+    .replace('import { isOrderSupervisor, orderSupervisorIds } from "../order-supervisors";\n', "");
+  const source = `${team}\n${supervisors}\n${permissions}`;
   const output = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   }).outputText;

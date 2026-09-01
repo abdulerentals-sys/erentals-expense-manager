@@ -1,0 +1,1 @@
+ALTER TABLE `orders` ADD `supervisor_ids` text DEFAULT '[]' NOT NULL;

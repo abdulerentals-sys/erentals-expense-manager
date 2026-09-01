@@ -14,8 +14,13 @@ async function loadTypeScriptModule(path) {
 }
 
 test("expense references are generated internally, unique-friendly and hidden from every role", async () => {
+  const supervisorHelpers = await read("app/order-supervisors.ts");
+  const expenseRules = (await read("app/expense-rules.ts")).replace('import { isOrderSupervisor } from "./order-supervisors";\n\n', "");
+  const compiledRules = ts.transpileModule(`${supervisorHelpers}\n${expenseRules}`, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
   const [rules, permissions, dashboard, sitesRoute, mongoRoute] = await Promise.all([
-    loadTypeScriptModule("app/expense-rules.ts"),
+    import(`data:text/javascript;base64,${Buffer.from(compiledRules).toString("base64")}`),
     read("app/auth/permissions.ts"),
     read("app/components/ExpenseDashboard.tsx"),
     read("app/api/records/route.ts"),

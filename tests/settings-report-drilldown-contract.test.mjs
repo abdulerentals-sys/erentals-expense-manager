@@ -6,7 +6,9 @@ import ts from "typescript";
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
 async function loadExpenseRules() {
-  const source = await read("app/expense-rules.ts");
+  const helpers = await read("app/order-supervisors.ts");
+  const rules = (await read("app/expense-rules.ts")).replace('import { isOrderSupervisor } from "./order-supervisors";\n\n', "");
+  const source = `${helpers}\n${rules}`;
   const output = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   }).outputText;

@@ -1,4 +1,5 @@
 import { resolveUserPersonId } from "./team";
+import { isOrderSupervisor, orderSupervisorIds } from "../order-supervisors";
 import type { UserRole } from "./types";
 
 export type DashboardSection =
@@ -82,10 +83,11 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
   if (role === "supervisor") {
     const allOrders = Array.isArray(data.orders) ? data.orders as Array<Record<string, unknown>> : [];
     const supervisorPersonIds = new Set(currentPersonId ? [currentPersonId] : []);
-    const ownOrders = allOrders.filter((order) => supervisorPersonIds.has(String(order.assignedPersonId ?? "")));
+    const ownOrders = allOrders.filter((order) => isOrderSupervisor(order, currentPersonId));
     const activeOrders = ownOrders.filter((order) => order.status !== "Completed" && order.status !== "Cancelled");
     const activeOrderIds = new Set(activeOrders.map((order) => String(order.id ?? "")));
     const allOrderIds = new Set(ownOrders.map((order) => String(order.id ?? "")));
+    const activeSupervisorIds = new Set(activeOrders.flatMap((order) => orderSupervisorIds(order)));
     const activeCustomerIds = new Set(activeOrders.map((order) => String(order.customerId ?? "")));
     const allCustomerIds = new Set(ownOrders.map((order) => String(order.customerId ?? "")));
     const sanitizeOrder = (order: Record<string, unknown>) => ({ ...order, contractValue: 0, productPrice: 0, attachmentKey: "", attachmentName: "", attachmentType: "" });
@@ -99,7 +101,7 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
       ...data,
       customers: customers.filter((customer) => activeCustomerIds.has(String(customer.id ?? ""))).map((customer) => ({ ...customer, openingBalance: 0 })),
       historyCustomers: customers.filter((customer) => allCustomerIds.has(String(customer.id ?? ""))).map((customer) => ({ id: customer.id, name: customer.name, businessName: customer.businessName })),
-      persons: people.filter((person) => supervisorPersonIds.has(String(person.id ?? "")) || activeOrderIds.has(String(person.orderId ?? ""))).map((person) => ({ ...person, paymentMode: "" })),
+      persons: people.filter((person) => activeSupervisorIds.has(String(person.id ?? "")) || activeOrderIds.has(String(person.orderId ?? ""))).map((person) => ({ ...person, paymentMode: "" })),
       vendors: vendors.map((vendor) => ({ id: vendor.id, name: vendor.name, contactPerson: "", phone: "", email: "", gstin: "", address: "", paymentMode: "", status: vendor.status, createdAt: vendor.createdAt })),
       vendorProducts: vendorProducts.map((product) => ({ ...product, rentalCharge: 0 })),
       orders: activeOrders.map(sanitizeOrder),
