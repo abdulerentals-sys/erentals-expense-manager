@@ -11,6 +11,12 @@ export const EXPENSE_CATEGORIES = [
 
 export type ExpenseCategory = (typeof EXPENSE_CATEGORIES)[number];
 
+export function createExpenseNumber(date = new Date(), uniqueId = crypto.randomUUID()) {
+  const timestamp = date.toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
+  const suffix = uniqueId.replace(/[^a-z0-9]/gi, "").slice(0, 6).toUpperCase().padEnd(6, "0");
+  return `EXP-${timestamp}-${suffix}`;
+}
+
 type ExpensePerson = {
   id: string;
   role: string;

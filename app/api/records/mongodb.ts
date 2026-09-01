@@ -7,7 +7,7 @@ import {
 } from "mongodb";
 import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
-import { expenseCategoryKey, isAllowedExpenseCategory, isBuiltInExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
+import { createExpenseNumber, expenseCategoryKey, isAllowedExpenseCategory, isBuiltInExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis, type ProductType } from "../../vendor-pricing";
 
 type Payload = Record<string, unknown>;
@@ -730,7 +730,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
       }
       const row: Expense = {
         id: crypto.randomUUID(),
-        expenseNo: clean(payload.expenseNo) || `EXP-${Date.now().toString().slice(-6)}`,
+        expenseNo: createExpenseNumber(new Date(createdAt)),
         orderId,
         personId,
         category,
@@ -926,6 +926,9 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       findById(collections.persons, assignedPersonId),
     ]);
     if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
+    if (existingOrder.status === "Completed" && userRole !== "admin") {
+      return Response.json({ error: "Only an administrator can edit a completed order" }, { status: 403 });
+    }
     if (userRole === "supervisor") {
       const supervisorPerson = await findSessionPerson(collections, context);
       if (!supervisorPerson) throw new FormError("Add an active People record with your name and Supervisor role");

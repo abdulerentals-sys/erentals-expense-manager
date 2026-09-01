@@ -64,6 +64,12 @@ export function visibleSections(role: UserRole) {
 }
 
 export function filterRecordData<T extends Record<string, unknown>>(data: T, role: UserRole, userPersonId = "", userName = "", userEmail = ""): T {
+  if (Array.isArray(data.expenses) && data.expenses.length > 0) {
+    data = {
+      ...data,
+      expenses: (data.expenses as Array<Record<string, unknown>>).map((expense) => ({ ...expense, expenseNo: "" })),
+    } as T;
+  }
   if (role === "admin" || role === "accountant") return data;
   const people = Array.isArray(data.persons) ? data.persons as Array<Record<string, unknown>> : [];
   const currentPersonId = resolveUserPersonId(people.map((person) => ({

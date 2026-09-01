@@ -3,7 +3,7 @@ import { canCreateRecord, canRecordPayment, filterRecordData } from "../../auth/
 import { getSessionUser } from "../../auth/session";
 import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
-import { expenseCategoryKey, isAllowedExpenseCategory, isBuiltInExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
+import { createExpenseNumber, expenseCategoryKey, isAllowedExpenseCategory, isBuiltInExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis } from "../../vendor-pricing";
 import { getDb } from "../../../db";
 import { ensureSchema } from "../../../db/ensure";
@@ -553,7 +553,7 @@ export async function POST(request: Request) {
       if (!amount) return Response.json({ error: "Expense amount must be greater than zero" }, { status: 400 });
       const row = {
         id: crypto.randomUUID(),
-        expenseNo: clean(payload.expenseNo) || `EXP-${Date.now().toString().slice(-6)}`,
+        expenseNo: createExpenseNumber(new Date(createdAt)),
         orderId,
         personId,
         category,
@@ -765,6 +765,9 @@ export async function PATCH(request: Request) {
       db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, assignedPersonId)).limit(1),
     ]);
     if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
+    if (existingOrder.status === "Completed" && user.role !== "admin") {
+      return Response.json({ error: "Only an administrator can edit a completed order" }, { status: 403 });
+    }
     if (user.role === "supervisor") {
       const supervisorPerson = await findSessionPerson(db, user);
       if (!supervisorPerson) return Response.json({ error: "Add an active People record with your name and Supervisor role" }, { status: 400 });
