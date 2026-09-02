@@ -14,6 +14,7 @@ import { adminDateRange, dateIsInRange, indiaDateKey, shiftDateKey, summarizeAdm
 import { isOrderSupervisor, orderSupervisorIds } from "../order-supervisors";
 import { buildCustomerLedger, ledgerBalanceSide } from "../customer-ledger";
 import { isActiveOrder, isFinancialOrder, isHistoricalOrder } from "../order-lifecycle";
+import { approvedExpenseTotal, pendingReimbursementTotal, reimbursementPending, reimbursementTotal, type SupervisorExpenseRow, type SupervisorExpenseStatus } from "../supervisor-expenses";
 
 type Customer = { id: string; name: string; businessName: string; phone: string; email: string; gstin: string; address: string; openingBalance: number; createdAt: string };
 type Person = { id: string; name: string; role: string; phone: string; email: string; paymentMode: string; status: string; orderId: string; createdAt: string };
@@ -24,15 +25,18 @@ type OrderProduct = { id: string; orderId: string; name: string; quantity: numbe
 type OrderProductDraft = { key: string; name: string; quantity: number; price: number };
 type OrderVendor = { id: string; orderId: string; vendorId: string; productId: string; productName: string; productType: ProductType; pricingBasis: PricingBasis; unitRate: number; quantity: number; measurement: number; rentalDays: number; amount: number; notes: string; createdAt: string };
 type OrderVendorDraft = { key: string; vendorId: string; productName: string; amount: number; notes: string };
-type Expense = { id: string; expenseNo: string; orderId: string; personId: string; vendorId: string; category: string; vendor: string; description: string; expenseDate: string; amount: number; paymentMode: string; receiptKey: string; receiptName: string; createdAt: string };
+type Expense = { id: string; expenseNo: string; orderId: string; personId: string; vendorId: string; category: string; vendor: string; description: string; expenseDate: string; amount: number; paymentMode: string; receiptKey: string; receiptName: string; status?: SupervisorExpenseStatus; reimbursedAmount?: number; createdAt: string };
 type ExpenseCategoryRecord = { id: string; name: string; status: string; createdAt: string };
 type Payment = { id: string; orderId: string; manualOrderId: string; personId: string; vendorId: string; customerId: string; direction: string; amount: number; paymentDate: string; method: string; reference: string; notes: string; createdAt: string };
 type AdminDetailItem = { id: string; date: string; title: string; meta: string; detail: string; amount?: number; status?: string };
 type AdminReportDetail = { eyebrow: string; title: string; description: string; summary: Array<{ label: string; value: string }>; items: AdminDetailItem[] };
 type AppData = { customers: Customer[]; historyCustomers: Customer[]; persons: Person[]; vendors: Vendor[]; vendorProducts: VendorProduct[]; orders: Order[]; historyOrders: Order[]; orderProducts: OrderProduct[]; orderVendors: OrderVendor[]; expenses: Expense[]; expenseCategories: ExpenseCategoryRecord[]; payments: Payment[]; supervisorLinked?: boolean; currentPersonId?: string };
+type SupervisorWorkflowData = { expenses: SupervisorExpenseRow[]; orders: Array<{ id: string; orderNo: string; title: string; contractValue: number }>; payments: Payment[]; supervisorId: string; supervisorName: string };
+type ExpenseDetailSelection = { kind: "order" | "person"; id: string; title: string } | null;
 type ModalKind = "customer" | "person" | "vendor" | "vendorProduct" | "order" | "orderVendor" | "expense" | "payment" | null;
 
 const emptyData: AppData = { customers: [], historyCustomers: [], persons: [], vendors: [], vendorProducts: [], orders: [], historyOrders: [], orderProducts: [], orderVendors: [], expenses: [], expenseCategories: [], payments: [] };
+const emptySupervisorWorkflow: SupervisorWorkflowData = { expenses: [], orders: [], payments: [], supervisorId: "", supervisorName: "" };
 const navItems = [
   { key: "overview", label: "Overview", icon: "⌂", href: "/" },
   { key: "customers", label: "Customers", icon: "◎", href: "/customers" },
@@ -81,7 +85,7 @@ const orderDisplayTitle = (order: Order) => order.title || order.orderNo;
 const catalogProductType = (value: unknown): ProductType => isProductType(value) ? value : "Quantity-wise";
 
 function Status({ value }: { value: string }) {
-  const tone = ["Paid", "Active", "Completed", "Received", "Advance"].includes(value) ? "success" : ["Overdue", "Cancelled", "Archived", "Paid out"].includes(value) ? "danger" : ["Part paid", "In progress", "Sent", "Payment due"].includes(value) ? "warning" : "neutral";
+  const tone = ["Paid", "Active", "Completed", "Received", "Advance", "Approved", "Reimbursed"].includes(value) ? "success" : ["Overdue", "Cancelled", "Archived", "Paid out", "Disapproved", "Rejected"].includes(value) ? "danger" : ["Part paid", "In progress", "Sent", "Payment due", "Pending approval", "Awaiting approval", "Pending reimbursement"].includes(value) ? "warning" : "neutral";
   return <span className={`status ${tone}`}>{value}</span>;
 }
 
@@ -684,9 +688,9 @@ function downloadSpreadsheetWorkbook(sheets: Array<{ name: string; rows: Spreads
   URL.revokeObjectURL(url);
 }
 
-function BreakdownPanel({ title, eyebrow, rows, total }: { title: string; eyebrow: string; rows: ExpenseBreakdown[]; total: number }) {
+function BreakdownPanel({ title, eyebrow, rows, total, onSelect }: { title: string; eyebrow: string; rows: ExpenseBreakdown[]; total: number; onSelect?: (row: ExpenseBreakdown) => void }) {
   const max = Math.max(...rows.map((row) => row.amount), 1);
-  return <article className="panel expense-breakdown-panel"><div className="panel-head"><div><span className="overline">{eyebrow}</span><h3>{title}</h3></div><strong>{fmt(total)}</strong></div><div className="expense-breakdown-list">{rows.map((row) => <div className="expense-breakdown-row" key={row.id}><div><strong>{row.name}</strong><span>{row.detail} · {row.count} record{row.count === 1 ? "" : "s"}</span></div><strong>{fmt(row.amount)}</strong><i><b style={{ width: `${(row.amount / max) * 100}%` }} /></i></div>)}{!rows.length && <div className="mini-empty">No expenses match this filter.</div>}</div></article>;
+  return <article className="panel expense-breakdown-panel"><div className="panel-head"><div><span className="overline">{eyebrow}</span><h3>{title}</h3></div><strong>{fmt(total)}</strong></div><div className="expense-breakdown-list">{rows.map((row) => { const content = <><div><strong>{row.name}</strong><span>{row.detail} · {row.count} record{row.count === 1 ? "" : "s"}</span></div><strong>{fmt(row.amount)}</strong><i><b style={{ width: `${(row.amount / max) * 100}%` }} /></i></>; return onSelect ? <button type="button" className="expense-breakdown-row expense-breakdown-button" key={row.id} onClick={() => onSelect(row)}>{content}</button> : <div className="expense-breakdown-row" key={row.id}>{content}</div>; })}{!rows.length && <div className="mini-empty">No expenses match this filter.</div>}</div></article>;
 }
 
 function ExpensesPage({ data, user, openModal }: { data: AppData; user: PublicUser; openModal: (kind: Exclude<ModalKind, null>) => void }) {
@@ -694,6 +698,28 @@ function ExpensesPage({ data, user, openModal }: { data: AppData; user: PublicUs
   const [customFrom, setCustomFrom] = useState(today());
   const [customTo, setCustomTo] = useState(today());
   const [selectedOrderId, setSelectedOrderId] = useState("");
+  const [workflow, setWorkflow] = useState<SupervisorWorkflowData>(emptySupervisorWorkflow);
+  const [workflowLoading, setWorkflowLoading] = useState(true);
+  const [workflowError, setWorkflowError] = useState("");
+  const [workflowWorking, setWorkflowWorking] = useState("");
+  const [workflowToast, setWorkflowToast] = useState("");
+  const [expenseDetail, setExpenseDetail] = useState<ExpenseDetailSelection>(null);
+  const loadWorkflow = useCallback(async () => {
+    setWorkflowLoading(true);
+    try {
+      const response = await fetch("/api/expense-approvals", { cache: "no-store" });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Unable to load supervisor reimbursements");
+      setWorkflow(body);
+      setWorkflowError("");
+    } catch (error) {
+      setWorkflowError(error instanceof Error ? error.message : "Unable to load supervisor reimbursements");
+    } finally {
+      setWorkflowLoading(false);
+    }
+  }, []);
+  useEffect(() => { const timer = window.setTimeout(() => void loadWorkflow(), 0); return () => window.clearTimeout(timer); }, [loadWorkflow]);
+  useEffect(() => { if (!workflowToast) return; const timer = window.setTimeout(() => setWorkflowToast(""), 3500); return () => window.clearTimeout(timer); }, [workflowToast]);
   const dateRange = useMemo(() => expensePeriodRange(period, customFrom, customTo), [period, customFrom, customTo]);
   const filteredExpenses = useMemo(() => data.expenses.filter((expense) =>
     expense.expenseDate >= dateRange.from
@@ -742,6 +768,66 @@ function ExpensesPage({ data, user, openModal }: { data: AppData; user: PublicUs
   const selectedCustomer = selectedOrder ? customerById(selectedOrder.customerId) : undefined;
   const selectedSalesperson = selectedOrder ? personById(selectedOrder.salespersonId) : undefined;
   const selectedSupervisors = selectedOrder ? orderSupervisorIds(selectedOrder).map(personById).filter((person): person is Person => Boolean(person)) : [];
+  const workflowExpenses = useMemo(() => workflow.expenses.filter((expense) =>
+    expense.expenseDate >= dateRange.from
+    && expense.expenseDate <= dateRange.to
+    && (!selectedOrderId || expense.orderId === selectedOrderId)
+  ), [workflow.expenses, dateRange, selectedOrderId]);
+  const workflowExpenseById = useMemo(() => new Map(workflow.expenses.map((expense) => [expense.id, expense])), [workflow.expenses]);
+  const approvedSupervisorCost = approvedExpenseTotal(workflowExpenses);
+  const pendingReimbursement = pendingReimbursementTotal(workflowExpenses);
+  const reimbursedSupervisorCost = reimbursementTotal(workflowExpenses);
+  const pendingApproval = workflowExpenses.filter((expense) => expense.status === "Pending approval").reduce((sum, expense) => sum + expense.amount, 0);
+  const supervisorSummaries = useMemo(() => {
+    const rows = new Map<string, { id: string; name: string; submitted: number; approved: number; pending: number; reimbursed: number; count: number }>();
+    for (const expense of workflowExpenses) {
+      const current = rows.get(expense.supervisorId) || { id: expense.supervisorId, name: expense.supervisorName || "Supervisor", submitted: 0, approved: 0, pending: 0, reimbursed: 0, count: 0 };
+      current.submitted += expense.amount;
+      current.approved += expense.status === "Approved" ? expense.amount : 0;
+      current.pending += expense.status === "Approved" ? reimbursementPending(expense.amount, expense.reimbursedAmount) : 0;
+      current.reimbursed += expense.reimbursedAmount;
+      current.count += 1;
+      rows.set(expense.supervisorId, current);
+    }
+    return [...rows.values()].sort((a, b) => b.submitted - a.submitted || a.name.localeCompare(b.name));
+  }, [workflowExpenses]);
+  const orderReimbursementSummary = useMemo(() => {
+    const rows = new Map<string, { pending: number; reimbursed: number }>();
+    for (const expense of workflowExpenses) {
+      const current = rows.get(expense.orderId) || { pending: 0, reimbursed: 0 };
+      current.pending += expense.status === "Approved" ? reimbursementPending(expense.amount, expense.reimbursedAmount) : 0;
+      current.reimbursed += expense.reimbursedAmount;
+      rows.set(expense.orderId, current);
+    }
+    return rows;
+  }, [workflowExpenses]);
+  const personReimbursementSummary = useMemo(() => new Map(supervisorSummaries.map((row) => [row.id, row])), [supervisorSummaries]);
+  const orderRowsWithReimbursement = orderRows.map((row) => { const reimbursement = orderReimbursementSummary.get(row.id); return reimbursement ? { ...row, detail: `${row.detail} · ${fmt(reimbursement.pending)} pending · ${fmt(reimbursement.reimbursed)} reimbursed` } : row; });
+  const personRowsWithReimbursement = personRows.map((row) => { const reimbursement = personReimbursementSummary.get(row.id); return reimbursement ? { ...row, detail: `${row.detail} · ${fmt(reimbursement.pending)} pending · ${fmt(reimbursement.reimbursed)} reimbursed` } : row; });
+  const visibleWorkflowPayments = useMemo(() => workflow.payments.filter((payment) => !selectedOrderId || payment.orderId === selectedOrderId), [workflow.payments, selectedOrderId]);
+  const detailExpenses = expenseDetail ? filteredExpenses.filter((expense) => expenseDetail.kind === "order" ? expense.orderId === expenseDetail.id : expense.personId === expenseDetail.id) : [];
+  const detailWorkflowExpenses = expenseDetail ? workflowExpenses.filter((expense) => expenseDetail.kind === "order" ? expense.orderId === expenseDetail.id : expense.supervisorId === expenseDetail.id) : [];
+  const detailPending = pendingReimbursementTotal(detailWorkflowExpenses);
+  const detailReimbursed = reimbursementTotal(detailWorkflowExpenses);
+  const detailOrderCount = new Set(detailExpenses.map((expense) => expense.orderId).filter(Boolean)).size;
+  const openExpenseDetail = (kind: "order" | "person", row: ExpenseBreakdown) => setExpenseDetail({ kind, id: row.id, title: row.name });
+  const updateSupervisorExpense = async (expense: SupervisorExpenseRow, action: "approve" | "disapprove" | "reimburse") => {
+    const amount = action === "reimburse" ? reimbursementPending(expense.amount, expense.reimbursedAmount) : undefined;
+    if (action === "disapprove" && !window.confirm("Reject this supervisor expense? It will not enter the pending reimbursement total.")) return;
+    if (action === "reimburse" && (!amount || !window.confirm(`Record reimbursement of ${fmt(amount)} to ${expense.supervisorName}?`))) return;
+    setWorkflowWorking(`${action}:${expense.id}`);
+    try {
+      const response = await fetch("/api/expense-approvals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, expenseId: expense.id, amount }) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Unable to update supervisor expense");
+      setWorkflowToast(action === "approve" ? "Expense approved" : action === "disapprove" ? "Expense rejected" : "Reimbursement recorded in payment history");
+      await loadWorkflow();
+    } catch (error) {
+      setWorkflowToast(error instanceof Error ? error.message : "Unable to update supervisor expense");
+    } finally {
+      setWorkflowWorking("");
+    }
+  };
 
   const exportFilteredExpenses = () => {
     const summaryRows: SpreadsheetValue[][] = [
@@ -793,11 +879,23 @@ function ExpensesPage({ data, user, openModal }: { data: AppData; user: PublicUs
   return <div className="section-stack expense-dashboard"><PageHead copy={`${filteredExpenses.length} expense records · ${fmt(total)} for ${dateRange.label.toLowerCase()}.`} action={<button className="btn btn-primary" onClick={() => openModal("expense")}>＋ Add expense</button>} secondary={<button className="btn btn-secondary" onClick={exportFilteredExpenses}>⇩ Export Excel</button>} />
     <section className="panel expense-filter-panel" aria-label="Expense report filters"><div><span className="overline">Reporting period</span><h2>Expense intelligence</h2><p>Compare spending by order, person and category, then export the exact filtered view.</p></div><div className="expense-period-tabs" role="group" aria-label="Expense period">{([['today', 'Today'], ['week', 'This week'], ['month', 'This month'], ['custom', 'Custom']] as Array<[ExpensePeriod, string]>).map(([value, label]) => <button type="button" className={period === value ? "active" : ""} aria-pressed={period === value} onClick={() => setPeriod(value)} key={value}>{label}</button>)}</div><div className="expense-filter-fields"><label><span>Order ID</span><select value={selectedOrderId} onChange={(event) => setSelectedOrderId(event.target.value)}><option value="">All order IDs</option>{data.orders.map((order) => <option value={order.id} key={order.id}>{order.orderNo}{order.title ? ` · ${order.title}` : ""}</option>)}</select></label>{period === "custom" && <><label><span>From date</span><input type="date" value={customFrom} max={customTo} onChange={(event) => setCustomFrom(event.target.value)} /></label><label><span>To date</span><input type="date" value={customTo} min={customFrom} onChange={(event) => setCustomTo(event.target.value)} /></label></>}</div></section>
     <section className="expense-summary-grid"><MetricCard label="Expense total" value={fmt(total)} change={dateRange.label} icon="₹" tone="orange" /><MetricCard label="Expense records" value={String(filteredExpenses.length)} change={selectedOrder ? selectedOrder.orderNo : "Across all orders"} icon="▤" tone="blue" /><MetricCard label="People spending" value={String(personCount)} change="Responsible team members" icon="♧" tone="green" /><MetricCard label="Average expense" value={fmt(average)} change="Per filtered record" icon="↗" tone="red" /></section>
-    <section className="expense-analysis-grid"><BreakdownPanel title="Order-wise expenses" eyebrow="Jobs" rows={orderRows} total={total} /><BreakdownPanel title="Person-wise expenses" eyebrow="Responsibility" rows={personRows} total={total} /><BreakdownPanel title="Category-wise expenses" eyebrow="Cost type" rows={categoryRows} total={total} /></section>
+    <section className="expense-analysis-grid"><BreakdownPanel title="Order-wise expenses" eyebrow="Jobs" rows={orderRowsWithReimbursement} total={total} onSelect={(row) => openExpenseDetail("order", row)} /><BreakdownPanel title="Person-wise expenses" eyebrow="Responsibility" rows={personRowsWithReimbursement} total={total} onSelect={(row) => openExpenseDetail("person", row)} /><BreakdownPanel title="Category-wise expenses" eyebrow="Cost type" rows={categoryRows} total={total} /></section>
     <section className="panel top-supervisor-panel"><div className="top-supervisor-icon">♙</div><div><span className="overline">Top supervisor spender</span><h3>{topSupervisor?.name || "No supervisor expense in this view"}</h3><p>{topSupervisor ? `${topSupervisor.count} expense record${topSupervisor.count === 1 ? "" : "s"} · ${topSupervisor.detail}${selectedOrder ? ` · ${selectedOrder.orderNo}` : ""}` : "Supervisor spending will appear after an expense is recorded."}</p></div><strong>{fmt(topSupervisor?.amount || 0)}</strong></section>
+    <section className="panel supervisor-reimbursement-panel" aria-label="Supervisor expense reimbursement workflow">
+      <div className="panel-head"><div><span className="overline">Supervisor reimbursement</span><h3>{user.role === "supervisor" ? "My expense status" : "Approval and payment status"}</h3><p>{user.role === "supervisor" ? "Track submitted, approved, rejected, pending and reimbursed expenses." : "Approve supervisor expenses, clear reimbursements and retain every payment in history."}</p></div>{workflowLoading && <span className="expense-result-count">Loading…</span>}</div>
+      {workflowError && <div className="form-error">{workflowError}</div>}
+      <div className="reimbursement-metric-grid"><div><span>Total supervisor expenses</span><strong>{fmt(workflowExpenses.reduce((sum, expense) => sum + expense.amount, 0))}</strong><small>{workflowExpenses.length} submitted · {fmt(approvedSupervisorCost)} approved</small></div><div><span>Awaiting approval</span><strong>{fmt(pendingApproval)}</strong><small>{workflowExpenses.filter((expense) => expense.status === "Pending approval").length} records</small></div><div><span>Pending reimbursement</span><strong className="negative">{fmt(pendingReimbursement)}</strong><small>Approved and not yet paid</small></div><div><span>Reimbursed</span><strong className="positive">{fmt(reimbursedSupervisorCost)}</strong><small>Moved to payment history</small></div></div>
+      <div className="supervisor-reimbursement-list"><div className="reimbursement-subhead"><h4>{user.role === "supervisor" ? "My reimbursement summary" : "Supervisor-wise reimbursement"}</h4><span>{supervisorSummaries.length} supervisor{supervisorSummaries.length === 1 ? "" : "s"}</span></div>{supervisorSummaries.map((row) => <button type="button" className="supervisor-reimbursement-row" key={row.id} onClick={() => setExpenseDetail({ kind: "person", id: row.id, title: row.name })}><span className="avatar tiny">{initials(row.name)}</span><span className="grow"><strong>{row.name}</strong><small>{row.count} submitted · {fmt(row.approved)} approved</small></span><span><small>Total</small><strong>{fmt(row.submitted)}</strong></span><span><small>Pending</small><strong className={row.pending ? "negative" : "positive"}>{fmt(row.pending)}</strong></span><span><small>Reimbursed</small><strong className="positive">{fmt(row.reimbursed)}</strong></span></button>)}{!workflowLoading && !supervisorSummaries.length && <div className="mini-empty">No supervisor expenses match this reporting period.</div>}</div>
+      <div className="reimbursement-subhead"><h4>Supervisor expense status</h4><span>{workflowExpenses.length} record{workflowExpenses.length === 1 ? "" : "s"}</span></div>
+      <div className="table-wrap"><table className="expense-workflow-table"><thead><tr><th>Date</th><th>Order</th><th>Supervisor</th><th>Expense</th><th>Approval</th><th>Payment status</th><th>Pending</th><th>Action</th></tr></thead><tbody>{workflowExpenses.map((expense) => { const pendingAmount = expense.status === "Approved" ? reimbursementPending(expense.amount, expense.reimbursedAmount) : 0; const paymentStatus = expense.status === "Disapproved" ? "Rejected" : expense.status === "Pending approval" ? "Awaiting approval" : pendingAmount > 0 ? "Pending reimbursement" : "Reimbursed"; return <tr key={expense.id}><td>{shortDate(expense.expenseDate)}</td><td><strong>{expense.orderNo}</strong><small>{expense.orderTitle}</small></td><td>{expense.supervisorName}</td><td><strong>{fmt(expense.amount)}</strong><small>{expense.category}</small></td><td><Status value={expense.status} /></td><td><Status value={paymentStatus} /></td><td className={pendingAmount ? "negative" : "positive"}>{pendingAmount ? fmt(pendingAmount) : "—"}</td><td className="reimbursement-actions">{user.role === "admin" && expense.status === "Pending approval" && <><button type="button" className="btn btn-primary btn-small" disabled={Boolean(workflowWorking)} onClick={() => void updateSupervisorExpense(expense, "approve")}>Approve</button><button type="button" className="btn btn-danger btn-small" disabled={Boolean(workflowWorking)} onClick={() => void updateSupervisorExpense(expense, "disapprove")}>Reject</button></>}{(user.role === "admin" || user.role === "accountant") && expense.status === "Approved" && pendingAmount > 0 && <button type="button" className="btn btn-primary btn-small" disabled={Boolean(workflowWorking)} onClick={() => void updateSupervisorExpense(expense, "reimburse")}>Reimburse</button>}</td></tr>; })}</tbody></table>{!workflowLoading && !workflowExpenses.length && <div className="mini-empty">No supervisor expense records match this view.</div>}</div>
+      <div className="reimbursement-subhead payment-history-head"><h4>Reimbursement payment history</h4><strong>{fmt(visibleWorkflowPayments.reduce((sum, payment) => sum + payment.amount, 0))}</strong></div>
+      <div className="table-wrap"><table className="expense-workflow-table reimbursement-history-table"><thead><tr><th>Date</th><th>Order</th><th>Supervisor</th><th>Amount</th><th>Reference</th><th>Notes</th></tr></thead><tbody>{visibleWorkflowPayments.map((payment) => <tr key={payment.id}><td>{shortDate(payment.paymentDate)}</td><td>{orderById(payment.orderId)?.orderNo || payment.orderId || "—"}</td><td>{personById(payment.personId)?.name || workflow.supervisorName || "—"}</td><td className="positive">{fmt(payment.amount)}</td><td>{payment.reference || "—"}</td><td>{payment.notes || "Supervisor reimbursement"}</td></tr>)}</tbody></table>{!visibleWorkflowPayments.length && <div className="mini-empty">No reimbursement payment has been recorded yet.</div>}</div>
+    </section>
     {selectedOrder && user.role !== "supervisor" && <section className="panel order-financial-panel"><div className="order-financial-head"><div><span className="overline">Complete order ledger</span><h2>{selectedOrder.orderNo} · {orderDisplayTitle(selectedOrder)}</h2><p>{customerDisplayName(selectedCustomer)} · <Status value={selectedOrder.status} /></p></div><div className="order-financial-identity"><span>Customer</span><strong>{selectedCustomer ? customerDisplayName(selectedCustomer) : "Not available"}</strong>{customerCompanyName(selectedCustomer) && <small>{customerCompanyName(selectedCustomer)}</small>}</div></div><div className="order-financial-metrics"><div><span>Total order value</span><strong>{fmt(selectedOrder.contractValue)}</strong></div><div><span>Customer receipts</span><strong className="positive">{fmt(orderReceived)}</strong></div><div><span>Remaining customer balance</span><strong className={remainingCustomerBalance ? "negative" : "positive"}>{fmt(remainingCustomerBalance)}</strong></div><div><span>Vendor commitment</span><strong>{fmt(vendorCommitment)}</strong></div><div><span>Vendor payouts</span><strong>{fmt(vendorPaid)}</strong></div><div><span>Vendor balance</span><strong className={vendorBalance ? "negative" : "positive"}>{fmt(vendorBalance)}</strong></div><div><span>All order expenses</span><strong>{fmt(orderExpenseTotal)}</strong></div><div><span>Supervisor expenses</span><strong>{fmt(supervisorExpenseTotal)}</strong></div></div><div className="order-detail-grid"><div><span>Salesperson</span><strong>{selectedSalesperson?.name || "Not assigned"}</strong></div><div><span>Supervisors</span><strong>{selectedSupervisors.map((person) => person.name).join(", ") || "Not assigned"}</strong></div><div><span>Delivery</span><strong>{shortDate(selectedOrder.deliveryDate || selectedOrder.eventDate)} · {selectedOrder.deliveryTime || "Time not added"}</strong></div><div><span>Pickup</span><strong>{shortDate(selectedOrder.pickupDate)} · {selectedOrder.pickupTime || "Time not added"}</strong></div><div><span>Delivery address</span><strong>{selectedOrder.deliveryAddress || selectedOrder.venue || (selectedOrder.pickupFromGodown ? "Pickup from godown" : "Not added")}</strong></div><div><span>Contact person</span><strong>{selectedOrder.contactPerson ? `${selectedOrder.contactPerson} · ${selectedOrder.contactPhone}` : "Not added"}</strong></div></div></section>}
     {selectedOrder && user.role === "supervisor" && <div className="form-hint">The filtered expense analysis above covers your assigned order and expenses recorded under your supervisor profile.</div>}
     <section className="panel expense-detail-panel"><div className="panel-head"><div><span className="overline">Filtered ledger</span><h3>Expense details</h3></div><span className="expense-result-count">{filteredExpenses.length} result{filteredExpenses.length === 1 ? "" : "s"}</span></div>{filteredExpenses.length ? <div className="table-panel"><div className="data-table expense-table"><div className="table-row table-header"><span>Expense</span><span>Order</span><span>Responsible person</span><span>Category</span><span>Payment</span><span>Amount</span><span>Receipt</span></div>{filteredExpenses.map((expense) => { const order = orderById(expense.orderId); const person = personById(expense.personId); return <div className="table-row" key={expense.id}><div><strong>{expense.description || expense.category}</strong><small>{shortDate(expense.expenseDate)}</small></div><div><strong>{order?.orderNo || "—"}</strong><small>{order ? orderDisplayTitle(order) : "Order not available"}</small></div><div className="entity-inline"><span className="avatar tiny">{initials(person?.name || "NA")}</span><span>{person?.name || "—"}</span></div><strong>{expense.category}</strong><span>{expense.paymentMode}</span><strong className="negative">{fmt(expense.amount)}</strong>{expense.receiptKey ? <a className="file-link" href={`/api/upload?key=${encodeURIComponent(expense.receiptKey)}`} target="_blank" rel="noreferrer">▤ View</a> : <span className="muted">—</span>}</div>; })}</div></div> : <div className="mini-empty">No expenses match this reporting period and order selection.</div>}</section>
+    {expenseDetail && <div className="modal-backdrop" role="presentation"><aside className="customer-drawer expense-detail-drawer" role="dialog" aria-modal="true" aria-label={`Expense details for ${expenseDetail.title}`}><button type="button" className="modal-close" onClick={() => setExpenseDetail(null)} aria-label="Close">×</button><div className="transaction-head"><span className="order-no">{expenseDetail.kind === "order" ? "Order-wise expenses" : "Person-wise expenses"}</span><h2>{expenseDetail.title}</h2><p>{detailExpenses.length} related expense record{detailExpenses.length === 1 ? "" : "s"} across {detailOrderCount} order{detailOrderCount === 1 ? "" : "s"}.</p></div><div className="transaction-summary"><div><span>Total amount</span><strong>{fmt(detailExpenses.reduce((sum, expense) => sum + expense.amount, 0))}</strong></div><div><span>Pending reimbursement</span><strong className={detailPending ? "negative" : "positive"}>{fmt(detailPending)}</strong></div><div><span>Reimbursed</span><strong className="positive">{fmt(detailReimbursed)}</strong></div></div><div className="drawer-section"><h3>Related expense records and payment status</h3><div className="transaction-list">{detailExpenses.map((expense) => { const order = orderById(expense.orderId); const supervisorExpense = workflowExpenseById.get(expense.id); const pendingAmount = supervisorExpense?.status === "Approved" ? reimbursementPending(supervisorExpense.amount, supervisorExpense.reimbursedAmount) : 0; const paymentStatus = !supervisorExpense ? "Recorded expense" : supervisorExpense.status === "Disapproved" ? "Rejected" : supervisorExpense.status === "Pending approval" ? "Awaiting approval" : pendingAmount ? "Pending reimbursement" : "Reimbursed"; return <div className="transaction-item" key={expense.id}><span className="activity-icon">₹</span><div className="grow"><strong>{expense.description || expense.category}</strong><span>{order?.orderNo || "Order"} · {shortDate(expense.expenseDate)} · {paymentStatus}</span><small>{expense.category}{supervisorExpense ? ` · ${fmt(supervisorExpense.reimbursedAmount)} reimbursed` : ""}</small></div><strong>{fmt(expense.amount)}</strong></div>; })}{!detailExpenses.length && <div className="mini-empty">No related expenses match the current date filter.</div>}</div></div></aside></div>}
+    {workflowToast && <div className="toast" role="status"><span>✓</span>{workflowToast}</div>}
   </div>;
 }
 

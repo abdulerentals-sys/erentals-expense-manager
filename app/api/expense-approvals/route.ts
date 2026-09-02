@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { getSessionUser } from "../../auth/session";
-import { resolveUserPersonId } from "../../auth/team";
+import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
 import { ensureSchema } from "../../../db/ensure";
 import { getDb } from "../../../db";
@@ -25,6 +25,10 @@ function allowedAction(role: UserRole, action: string) {
   return false;
 }
 
+function isSubmittedSupervisorExpense(expense: ExpenseRow, order: OrderRow | null | undefined, person: PersonRow | null | undefined) {
+  return isOrderTeamPerson(person, "supervisor") && isOrderSupervisor(order, String(expense.personId));
+}
+
 export async function GET() {
   const user = await getSessionUser();
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
@@ -43,7 +47,13 @@ function buildResponse(user: SessionUser, expenseRows: ExpenseRow[], orderRows: 
   const personMap = new Map(personRows.map((person) => [String(person.id), person]));
   const ownOrders = user.role === "supervisor" ? orderRows.filter((order) => isOrderSupervisor(order, currentPersonId)) : orderRows;
   const ownOrderIds = new Set(ownOrders.map((order) => String(order.id)));
-  const rows = expenseRows.filter((expense) => ownOrderIds.has(String(expense.orderId)) && (user.role !== "supervisor" || String(expense.personId) === String(currentPersonId))).map((expense) => {
+  const rows = expenseRows.filter((expense) => {
+    const order = orderMap.get(String(expense.orderId));
+    const person = personMap.get(String(expense.personId));
+    return isSubmittedSupervisorExpense(expense, order, person)
+      && ownOrderIds.has(String(expense.orderId))
+      && (user.role !== "supervisor" || String(expense.personId) === String(currentPersonId));
+  }).map((expense) => {
     const order = orderMap.get(String(expense.orderId));
     const person = personMap.get(String(expense.personId));
     const reimbursedAmount = money(expense.reimbursedAmount);
@@ -76,14 +86,23 @@ export async function POST(request: Request) {
   if (isNetlify()) return mutateMongo(user, action, expenseId, money(body.amount));
   await ensureSchema();
   const db = getDb();
-  const [expense] = await db.select().from(expenses).where(eq(expenses.id, expenseId));
+  const [expenseRows, orderRows, personRows] = await Promise.all([
+    db.select().from(expenses).where(eq(expenses.id, expenseId)),
+    db.select().from(orders),
+    db.select().from(persons),
+  ]);
+  const expense = expenseRows[0];
   if (!expense) return Response.json({ error: "Expense not found" }, { status: 404 });
+  const order = orderRows.find((row) => String(row.id) === String(expense.orderId));
+  const person = personRows.find((row) => String(row.id) === String(expense.personId));
+  if (!isSubmittedSupervisorExpense(expense as ExpenseRow, order as unknown as OrderRow | undefined, person as unknown as PersonRow | undefined)) return Response.json({ error: "Only expenses submitted by an assigned supervisor can use this workflow" }, { status: 409 });
+  const status = expenseStatus(expense.status);
   if (action === "approve" || action === "disapprove") {
-    if (action === "approve" && expense.status === "Disapproved") return Response.json({ error: "A disapproved expense cannot be approved again" }, { status: 409 });
+    if (action === "approve" && status === "Disapproved") return Response.json({ error: "A disapproved expense cannot be approved again" }, { status: 409 });
     await db.update(expenses).set(action === "approve" ? { status: "Approved", approvedAt: now(), approvedBy: user.name, disapprovedAt: "", disapprovedBy: "" } : { status: "Disapproved", disapprovedAt: now(), disapprovedBy: user.name }).where(eq(expenses.id, expenseId));
     return Response.json({ ok: true });
   }
-  if (expense.status !== "Approved") return Response.json({ error: "Only approved expenses can be reimbursed" }, { status: 409 });
+  if (status !== "Approved") return Response.json({ error: "Only approved expenses can be reimbursed" }, { status: 409 });
   const pending = reimbursementPending(expense.amount, expense.reimbursedAmount);
   const amount = money(body.amount) || pending;
   if (!amount || amount > pending) return Response.json({ error: `Reimbursement cannot exceed ${pending}` }, { status: 400 });
@@ -98,15 +117,20 @@ async function mutateMongo(user: SessionUser, action: string, expenseId: string,
   try {
     const db = client.db();
     const expensesCollection = db.collection<ExpenseRow>("expenses");
+    const ordersCollection = db.collection<OrderRow>("orders");
+    const personsCollection = db.collection<PersonRow>("persons");
     const paymentsCollection = db.collection<PaymentRow>("payments");
     const expense = await expensesCollection.findOne({ id: expenseId });
     if (!expense) return Response.json({ error: "Expense not found" }, { status: 404 });
+    const [order, person] = await Promise.all([ordersCollection.findOne({ id: expense.orderId }), personsCollection.findOne({ id: expense.personId })]);
+    if (!isSubmittedSupervisorExpense(expense, order, person)) return Response.json({ error: "Only expenses submitted by an assigned supervisor can use this workflow" }, { status: 409 });
+    const status = expenseStatus(expense.status);
     if (action === "approve" || action === "disapprove") {
-      if (action === "approve" && expense.status === "Disapproved") return Response.json({ error: "A disapproved expense cannot be approved again" }, { status: 409 });
+      if (action === "approve" && status === "Disapproved") return Response.json({ error: "A disapproved expense cannot be approved again" }, { status: 409 });
       await expensesCollection.updateOne({ id: expenseId }, { $set: action === "approve" ? { status: "Approved", approvedAt: now(), approvedBy: user.name, disapprovedAt: "", disapprovedBy: "" } : { status: "Disapproved", disapprovedAt: now(), disapprovedBy: user.name } });
       return Response.json({ ok: true });
     }
-    if (expense.status !== "Approved") return Response.json({ error: "Only approved expenses can be reimbursed" }, { status: 409 });
+    if (status !== "Approved") return Response.json({ error: "Only approved expenses can be reimbursed" }, { status: 409 });
     const pending = reimbursementPending(Number(expense.amount), Number(expense.reimbursedAmount));
     const amount = requestedAmount || pending;
     if (!amount || amount > pending) return Response.json({ error: `Reimbursement cannot exceed ${pending}` }, { status: 400 });

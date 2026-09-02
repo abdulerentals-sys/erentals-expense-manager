@@ -11,40 +11,38 @@ async function load(path) {
 }
 
 test("supervisor expense reimbursement keeps approved cost separate from reimbursement pending", async () => {
-  const { approvedExpenseTotal, reimbursementTotal, pendingReimbursementTotal, reimbursementPending, expenseStatus } = await load("app/supervisor-expenses.ts");
+  const { approvedExpenseTotal, reimbursementTotal, pendingReimbursementTotal, reimbursementPending, orderExpenseTotal, expenseStatus } = await load("app/supervisor-expenses.ts");
   const rows = [
-    { amount: 1000, status: expenseStatus("Approved"), reimbursedAmount: 400 },
-    { amount: 700, status: expenseStatus("Approved"), reimbursedAmount: 700 },
-    { amount: 300, status: expenseStatus("Pending approval"), reimbursedAmount: 0 },
-    { amount: 500, status: expenseStatus("Disapproved"), reimbursedAmount: 0 },
+    { orderId: "order-1", amount: 1000, status: expenseStatus("Approved"), reimbursedAmount: 400 },
+    { orderId: "order-1", amount: 700, status: expenseStatus("Approved"), reimbursedAmount: 700 },
+    { orderId: "order-1", amount: 300, status: expenseStatus("Pending approval"), reimbursedAmount: 0 },
+    { orderId: "order-1", amount: 500, status: expenseStatus("Disapproved"), reimbursedAmount: 0 },
   ];
   assert.equal(approvedExpenseTotal(rows), 1700);
   assert.equal(reimbursementTotal(rows), 1100);
   assert.equal(pendingReimbursementTotal(rows), 600);
   assert.equal(reimbursementPending(1000, 400), 600);
   assert.equal(reimbursementPending(700, 900), 0);
+  assert.equal(orderExpenseTotal(rows, "order-1"), 1700);
 });
 
-test("expense command centre provides clickable overview breakdowns and approval controls", async () => {
-  const [dashboard, page, history, styles, route, schema, ensure] = await Promise.all([
-    read("app/components/SupervisorExpenseDashboard.tsx"),
-    read("app/expenses/page.tsx"),
-    read("app/components/SupervisorReimbursementHistory.tsx"),
-    read("app/components/SupervisorExpenseStyles.tsx"),
+test("the existing expense dashboard gains clickable reimbursement details without a replacement layout", async () => {
+  const [dashboard, sectionPage, route, schema, ensure] = await Promise.all([
+    read("app/components/ExpenseDashboard.tsx"),
+    read("app/[section]/page.tsx"),
     read("app/api/expense-approvals/route.ts"),
     read("db/schema.ts"),
     read("db/ensure.ts"),
   ]);
-  for (const label of ["Total expenses", "Person-wise expense", "Order-wise expense", "Pending reimbursement", "Supervisor reimbursement"]) assert.match(dashboard, new RegExp(label, "i"));
-  assert.match(dashboard, /setDetail\("total"\)/);
-  assert.match(dashboard, /setDetail\("person"\)/);
-  assert.match(dashboard, /setDetail\("order"\)/);
+  await assert.rejects(read("app/expenses/page.tsx"), /ENOENT/);
+  assert.match(sectionPage, /ExpenseDashboard/);
+  for (const label of ["Order-wise expenses", "Person-wise expenses", "Pending reimbursement", "Reimbursed", "Supervisor reimbursement"]) assert.match(dashboard, new RegExp(label, "i"));
+  assert.match(dashboard, /onSelect=.*openExpenseDetail\("order"/s);
+  assert.match(dashboard, /onSelect=.*openExpenseDetail\("person"/s);
   assert.match(dashboard, /Approve/);
-  assert.match(dashboard, /Disapprove/);
+  assert.match(dashboard, /Reject/);
   assert.match(dashboard, /Reimburse/);
-  assert.match(page, /SupervisorExpenseDashboard/);
-  assert.match(history, /Reimbursements already paid/);
-  assert.match(styles, /expense-kpi-grid/);
+  assert.match(dashboard, /Reimbursement payment history/);
   assert.match(route, /action === "approve"/);
   assert.match(route, /action === "disapprove"/);
   assert.match(route, /action === "reimburse"/);
@@ -55,16 +53,17 @@ test("expense command centre provides clickable overview breakdowns and approval
 });
 
 test("supervisor expenses are filtered to the assigned supervisor and reimbursement does not become customer payment", async () => {
-  const [route, dashboard, history] = await Promise.all([
+  const [route, dashboard] = await Promise.all([
     read("app/api/expense-approvals/route.ts"),
-    read("app/components/SupervisorExpenseDashboard.tsx"),
-    read("app/components/SupervisorReimbursementHistory.tsx"),
+    read("app/components/ExpenseDashboard.tsx"),
   ]);
+  assert.match(route, /isOrderTeamPerson/);
+  assert.match(route, /isOrderSupervisor/);
   assert.match(route, /user\.role === "supervisor"/);
   assert.match(route, /String\(expense\.personId\) === String\(currentPersonId\)/);
   assert.match(route, /direction: "Reimbursement"/);
   assert.doesNotMatch(route, /direction: "Received"/);
   assert.match(dashboard, /reimbursementPending/);
   assert.match(dashboard, /Pending reimbursement/);
-  assert.match(history, /payment\.amount/);
+  assert.match(dashboard, /workflow\.payments/);
 });
