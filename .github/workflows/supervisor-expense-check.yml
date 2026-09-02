@@ -26,4 +26,16 @@ jobs:
       - name: Fail on lint errors
         if: steps.lint.outcome == 'failure'
         run: exit 1
-      - run: npm run build:netlify
+      - name: Netlify build
+        id: build
+        continue-on-error: true
+        run: npm run build:netlify > build-output.txt 2>&1
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supervisor-expense-build
+          path: build-output.txt
+      - name: Fail on build errors
+        if: steps.build.outcome == 'failure'
+        run: exit 1
