@@ -5,12 +5,12 @@ import type { UserRole } from "../../auth/types";
 import { ensureSchema } from "../../../db/ensure";
 import { getDb } from "../../../db";
 import { expenses, orders, persons, payments } from "../../../db/schema";
-import { isOrderSupervisor } from "../../order-supervisors";
+import { isOrderSupervisor, type OrderSupervisorFields } from "../../order-supervisors";
 import { expenseStatus, reimbursementPending } from "../../supervisor-expenses";
 
 type SessionUser = NonNullable<Awaited<ReturnType<typeof getSessionUser>>>;
 type ExpenseRow = { id: string; expenseNo: string; orderId: string; personId: string; category: string; vendor: string; description: string; expenseDate: string; amount: number; paymentMode: string; receiptKey: string; receiptName: string; status?: string; reimbursedAmount?: number; [key: string]: unknown };
-type OrderRow = { id: string; orderNo: string; title: string; venue?: string; customerId?: string; contractValue: number; status?: string; [key: string]: unknown };
+type OrderRow = OrderSupervisorFields & { id: string; orderNo: string; title: string; venue?: string; customerId?: string; contractValue: number; status?: string; [key: string]: unknown };
 type PersonRow = { id: string; name: string; email: string; role: string; status: string; [key: string]: unknown };
 type PaymentRow = { id: string; orderId: string; personId: string; direction: string; amount: number; paymentDate: string; reference: string; notes: string; [key: string]: unknown };
 
