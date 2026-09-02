@@ -25,43 +25,46 @@ test("supervisor expense reimbursement keeps approved cost separate from reimbur
   assert.equal(reimbursementPending(700, 900), 0);
 });
 
-test("expense dashboard has clickable business-overview breakdowns and supervisor reimbursement controls", async () => {
-  const [dashboard, permissions, sitesRoute, mongoRoute, schema, ensure] = await Promise.all([
-    read("app/components/ExpenseDashboard.tsx"),
-    read("app/auth/permissions.ts"),
-    read("app/api/records/route.ts"),
-    read("app/api/records/mongodb.ts"),
+test("expense command centre provides clickable overview breakdowns and approval controls", async () => {
+  const [dashboard, page, history, styles, route, schema, ensure] = await Promise.all([
+    read("app/components/SupervisorExpenseDashboard.tsx"),
+    read("app/expenses/page.tsx"),
+    read("app/components/SupervisorReimbursementHistory.tsx"),
+    read("app/components/SupervisorExpenseStyles.tsx"),
+    read("app/api/expense-approvals/route.ts"),
     read("db/schema.ts"),
     read("db/ensure.ts"),
   ]);
-  for (const label of ["Total expenses", "Person-wise expense", "Order-wise expense", "Supervisor reimbursement pending"]) assert.match(dashboard, new RegExp(label, "i"));
-  assert.match(dashboard, /onClick=\{\(\) => setExpenseDetail/);
-  assert.match(dashboard, /Expense detail/);
+  for (const label of ["Total expenses", "Person-wise expense", "Order-wise expense", "Pending reimbursement", "Supervisor reimbursement"]) assert.match(dashboard, new RegExp(label, "i"));
+  assert.match(dashboard, /setDetail\("total"\)/);
+  assert.match(dashboard, /setDetail\("person"\)/);
+  assert.match(dashboard, /setDetail\("order"\)/);
   assert.match(dashboard, /Approve/);
   assert.match(dashboard, /Disapprove/);
   assert.match(dashboard, /Reimburse/);
-  assert.match(dashboard, /Pending reimbursement/);
-  assert.match(permissions, /expenseApproval/);
-  assert.match(permissions, /expenseReimbursement/);
-  assert.match(sitesRoute, /expenseApproval/);
-  assert.match(mongoRoute, /expenseApproval/);
-  assert.match(schema, /expense_status/);
-  assert.match(schema, /reimbursed_amount/);
-  assert.match(ensure, /expense_status/);
+  assert.match(page, /SupervisorExpenseDashboard/);
+  assert.match(history, /Reimbursements already paid/);
+  assert.match(styles, /expense-kpi-grid/);
+  assert.match(route, /action === "approve"/);
+  assert.match(route, /action === "disapprove"/);
+  assert.match(route, /action === "reimburse"/);
+  assert.match(route, /direction: "Reimbursement"/);
+  assert.match(schema, /status: text\("status"\)/);
+  assert.match(schema, /reimbursedAmount/);
   assert.match(ensure, /reimbursed_amount/);
 });
 
-test("supervisor expenses are filtered to the assigned supervisor and paid reimbursement does not increase order pending payment", async () => {
-  const [permissions, route, mongo, dashboard] = await Promise.all([
-    read("app/auth/permissions.ts"),
-    read("app/api/records/route.ts"),
-    read("app/api/records/mongodb.ts"),
-    read("app/components/ExpenseDashboard.tsx"),
+test("supervisor expenses are filtered to the assigned supervisor and reimbursement does not become customer payment", async () => {
+  const [route, dashboard, history] = await Promise.all([
+    read("app/api/expense-approvals/route.ts"),
+    read("app/components/SupervisorExpenseDashboard.tsx"),
+    read("app/components/SupervisorReimbursementHistory.tsx"),
   ]);
-  assert.match(permissions, /expense\.personId/);
-  assert.match(route, /reimbursement/);
-  assert.match(mongo, /reimbursement/);
-  assert.match(dashboard, /reimbursedAmount/);
-  assert.match(dashboard, /remainingReimbursement/);
-  assert.match(dashboard, /order pending payment/i);
+  assert.match(route, /user\.role === "supervisor"/);
+  assert.match(route, /String\(expense\.personId\) === String\(currentPersonId\)/);
+  assert.match(route, /direction: "Reimbursement"/);
+  assert.doesNotMatch(route, /direction: "Received"/);
+  assert.match(dashboard, /reimbursementPending/);
+  assert.match(dashboard, /Pending reimbursement/);
+  assert.match(history, /payment\.amount/);
 });
