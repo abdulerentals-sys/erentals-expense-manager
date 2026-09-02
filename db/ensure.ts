@@ -4,7 +4,6 @@ let schemaReady: Promise<void> | null = null;
 
 export function ensureSchema() {
   if (schemaReady) return schemaReady;
-
   schemaReady = (async () => {
     const d1 = env.DB;
     if (!d1) throw new Error("Database storage is unavailable");
@@ -20,46 +19,24 @@ export function ensureSchema() {
       d1.prepare("CREATE TABLE IF NOT EXISTS order_vendors (id text PRIMARY KEY NOT NULL, order_id text NOT NULL, vendor_id text NOT NULL, product_id text DEFAULT '' NOT NULL, product_name text NOT NULL, product_type text DEFAULT 'Quantity-wise' NOT NULL, pricing_basis text DEFAULT 'Per event' NOT NULL, unit_rate integer DEFAULT 0 NOT NULL, quantity integer DEFAULT 1 NOT NULL, measurement real DEFAULT 1 NOT NULL, rental_days integer DEFAULT 1 NOT NULL, amount integer NOT NULL, notes text DEFAULT '' NOT NULL, created_at text NOT NULL)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS invoices (id text PRIMARY KEY NOT NULL, invoice_no text NOT NULL, customer_id text NOT NULL, order_id text NOT NULL, billed_person_id text NOT NULL, issue_date text NOT NULL, due_date text NOT NULL, subtotal integer NOT NULL, tax integer DEFAULT 0 NOT NULL, total integer NOT NULL, paid_amount integer DEFAULT 0 NOT NULL, status text DEFAULT 'Sent' NOT NULL, notes text DEFAULT '' NOT NULL, attachment_key text DEFAULT '' NOT NULL, attachment_name text DEFAULT '' NOT NULL, attachment_type text DEFAULT '' NOT NULL, created_at text NOT NULL)"),
       d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS invoices_invoice_no_unique ON invoices (invoice_no)"),
-      d1.prepare("CREATE TABLE IF NOT EXISTS expenses (id text PRIMARY KEY NOT NULL, expense_no text NOT NULL, order_id text NOT NULL, person_id text NOT NULL, vendor_id text DEFAULT '' NOT NULL, category text NOT NULL, vendor text NOT NULL, description text NOT NULL, expense_date text NOT NULL, amount integer NOT NULL, payment_mode text NOT NULL, receipt_key text DEFAULT '' NOT NULL, receipt_name text DEFAULT '' NOT NULL, created_at text NOT NULL)"),
+      d1.prepare("CREATE TABLE IF NOT EXISTS expenses (id text PRIMARY KEY NOT NULL, expense_no text NOT NULL, order_id text NOT NULL, person_id text NOT NULL, vendor_id text DEFAULT '' NOT NULL, category text NOT NULL, vendor text NOT NULL, description text NOT NULL, expense_date text NOT NULL, amount integer NOT NULL, payment_mode text NOT NULL, receipt_key text DEFAULT '' NOT NULL, receipt_name text DEFAULT '' NOT NULL, status text DEFAULT 'Pending approval' NOT NULL, approved_at text DEFAULT '' NOT NULL, approved_by text DEFAULT '' NOT NULL, disapproved_at text DEFAULT '' NOT NULL, disapproved_by text DEFAULT '' NOT NULL, reimbursed_amount integer DEFAULT 0 NOT NULL, created_at text NOT NULL)"),
       d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS expenses_expense_no_unique ON expenses (expense_no)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS expense_categories (id text PRIMARY KEY NOT NULL, name text NOT NULL, name_key text NOT NULL, status text DEFAULT 'Active' NOT NULL, created_at text NOT NULL)"),
       d1.prepare("CREATE UNIQUE INDEX IF NOT EXISTS expense_categories_name_key_unique ON expense_categories (name_key)"),
       d1.prepare("CREATE TABLE IF NOT EXISTS payments (id text PRIMARY KEY NOT NULL, order_id text DEFAULT '' NOT NULL, manual_order_id text DEFAULT '' NOT NULL, person_id text DEFAULT '' NOT NULL, vendor_id text DEFAULT '' NOT NULL, invoice_id text DEFAULT '' NOT NULL, customer_id text DEFAULT '' NOT NULL, direction text NOT NULL, amount integer NOT NULL, payment_date text NOT NULL, method text NOT NULL, reference text DEFAULT '' NOT NULL, notes text DEFAULT '' NOT NULL, created_at text NOT NULL)"),
     ]);
-
     const paymentColumns = await d1.prepare("PRAGMA table_info(payments)").all<{ name: string }>();
     const names = new Set((paymentColumns.results ?? []).map((column) => column.name));
-    if (!names.has("order_id")) {
-      await d1.prepare("ALTER TABLE payments ADD COLUMN order_id text DEFAULT '' NOT NULL").run();
-    }
-    if (!names.has("manual_order_id")) {
-      await d1.prepare("ALTER TABLE payments ADD COLUMN manual_order_id text DEFAULT '' NOT NULL").run();
-    }
-    if (!names.has("person_id")) {
-      await d1.prepare("ALTER TABLE payments ADD COLUMN person_id text DEFAULT '' NOT NULL").run();
-    }
-    if (!names.has("vendor_id")) {
-      await d1.prepare("ALTER TABLE payments ADD COLUMN vendor_id text DEFAULT '' NOT NULL").run();
-    }
+    for (const column of [["order_id", "text DEFAULT '' NOT NULL"], ["manual_order_id", "text DEFAULT '' NOT NULL"], ["person_id", "text DEFAULT '' NOT NULL"], ["vendor_id", "text DEFAULT '' NOT NULL"]] as const) if (!names.has(column[0])) await d1.prepare(`ALTER TABLE payments ADD COLUMN ${column[0]} ${column[1]}`).run();
     const expenseColumns = await d1.prepare("PRAGMA table_info(expenses)").all<{ name: string }>();
     const expenseNames = new Set((expenseColumns.results ?? []).map((column) => column.name));
-    if (!expenseNames.has("vendor_id")) {
-      await d1.prepare("ALTER TABLE expenses ADD COLUMN vendor_id text DEFAULT '' NOT NULL").run();
-    }
+    for (const column of [["vendor_id", "text DEFAULT '' NOT NULL"], ["status", "text DEFAULT 'Pending approval' NOT NULL"], ["approved_at", "text DEFAULT '' NOT NULL"], ["approved_by", "text DEFAULT '' NOT NULL"], ["disapproved_at", "text DEFAULT '' NOT NULL"], ["disapproved_by", "text DEFAULT '' NOT NULL"], ["reimbursed_amount", "integer DEFAULT 0 NOT NULL"]] as const) if (!expenseNames.has(column[0])) await d1.prepare(`ALTER TABLE expenses ADD COLUMN ${column[0]} ${column[1]}`).run();
     const personColumns = await d1.prepare("PRAGMA table_info(persons)").all<{ name: string }>();
     const personNames = new Set((personColumns.results ?? []).map((column) => column.name));
-    if (!personNames.has("order_id")) {
-      await d1.prepare("ALTER TABLE persons ADD COLUMN order_id text DEFAULT '' NOT NULL").run();
-    }
+    if (!personNames.has("order_id")) await d1.prepare("ALTER TABLE persons ADD COLUMN order_id text DEFAULT '' NOT NULL").run();
     const orderColumns = await d1.prepare("PRAGMA table_info(orders)").all<{ name: string }>();
     const orderNames = new Set((orderColumns.results ?? []).map((column) => column.name));
-    if (!orderNames.has("supervisor_ids")) {
-      await d1.prepare("ALTER TABLE orders ADD COLUMN supervisor_ids text DEFAULT '[]' NOT NULL").run();
-    }
-  })().catch((error) => {
-    schemaReady = null;
-    throw error;
-  });
-
+    if (!orderNames.has("supervisor_ids")) await d1.prepare("ALTER TABLE orders ADD COLUMN supervisor_ids text DEFAULT '[]' NOT NULL").run();
+  })().catch((error) => { schemaReady = null; throw error; });
   return schemaReady;
 }
