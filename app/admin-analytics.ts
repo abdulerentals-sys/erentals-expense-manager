@@ -72,7 +72,7 @@ export function dateIsInRange(value: string, range: AdminDateRange) {
 }
 
 export function summarizeAdminOrders<T extends AnalyticsOrder>(orders: T[], range: AdminDateRange) {
-  const confirmedOrders = orders.filter((order) => order.status !== "Cancelled");
+  const confirmedOrders = orders.filter((order) => !["Cancelled", "Archived"].includes(order.status));
   const newOrders = confirmedOrders.filter((order) => dateIsInRange(indiaDateKey(order.createdAt), range));
   const deliveries = confirmedOrders.filter((order) => dateIsInRange(order.deliveryDate, range)).sort((a, b) => `${a.deliveryDate}`.localeCompare(`${b.deliveryDate}`));
   const pickups = confirmedOrders.filter((order) => dateIsInRange(order.pickupDate, range)).sort((a, b) => `${a.pickupDate}`.localeCompare(`${b.pickupDate}`));

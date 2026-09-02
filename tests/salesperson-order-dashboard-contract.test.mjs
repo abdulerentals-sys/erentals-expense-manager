@@ -58,7 +58,7 @@ test("salesperson orders are ownership-filtered and expose clickable dated sched
   assert.match(dashboard, /AdminReportDrawer detail=\{detail\}/);
 });
 
-test("completed orders use the compact summary and only administrators can edit them", async () => {
+test("completed, cancelled, and archived orders use the compact history and archived orders stay read-only", async () => {
   const [dashboard, styles, sitesRoute, mongoRoute] = await Promise.all([
     read("app/components/ExpenseDashboard.tsx"),
     read("app/globals.css"),
@@ -66,9 +66,10 @@ test("completed orders use the compact summary and only administrators can edit 
     read("app/api/records/mongodb.ts"),
   ]);
 
-  assert.match(dashboard, /const completedOrders = visibleOrders\.filter\(\(order\) => order\.status === "Completed"\)/);
+  assert.match(dashboard, /const historicalOrders = visibleOrders\.filter\(isHistoricalOrder\)/);
   assert.match(dashboard, /completed-order-summary/);
-  assert.match(dashboard, /user\.role === "admin" && <button[^>]+onClick=\{\(\) => editOrder\(order\)\}>Edit<\/button>/);
+  assert.match(dashboard, /user\.role === "admin" && order\.status === "Completed" && <button[^>]+onClick=\{\(\) => editOrder\(order\)\}>Edit<\/button>/);
+  assert.match(dashboard, /Order History/);
   assert.match(styles, /\.completed-order-table \.table-row \{ min-height: 58px/);
   for (const source of [sitesRoute, mongoRoute]) {
     assert.match(source, /existingOrder\.status === "Completed"/);

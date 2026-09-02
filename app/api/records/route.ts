@@ -1,10 +1,11 @@
 import { and, desc, eq, ne } from "drizzle-orm";
-import { canCreateRecord, canEditCustomerProfile, canRecordPayment, filterRecordData } from "../../auth/permissions";
+import { canCreateRecord, canEditCustomerProfile, canEditVendorProfile, canRecordPayment, filterRecordData } from "../../auth/permissions";
 import { getSessionUser } from "../../auth/session";
 import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
 import { createExpenseNumber, expenseCategoryKey, isAllowedExpenseCategory, isBuiltInExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
 import { isOrderSupervisor, normalizeSupervisorIds } from "../../order-supervisors";
+import { ARCHIVED_ORDER_STATUS, isActiveOrder } from "../../order-lifecycle";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis } from "../../vendor-pricing";
 import { getDb } from "../../../db";
 import { ensureSchema } from "../../../db/ensure";
@@ -251,7 +252,7 @@ export async function POST(request: Request) {
         const supervisorPerson = await findSessionPerson(db, user);
         if (!supervisorPerson) return Response.json({ error: "Add an active People record with your name and Supervisor role" }, { status: 400 });
         const [ownedOrder] = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
-        if (!ownedOrder || !isOrderSupervisor(ownedOrder, supervisorPerson.id) || ["Completed", "Cancelled"].includes(ownedOrder.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
+        if (!ownedOrder || !isOrderSupervisor(ownedOrder, supervisorPerson.id) || !isActiveOrder(ownedOrder)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       }
       const row = {
         id: crypto.randomUUID(),
@@ -438,12 +439,13 @@ export async function POST(request: Request) {
         db.select().from(vendorProducts).where(eq(vendorProducts.id, productId)).limit(1),
       ]);
       if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
+      if (!isActiveOrder(order)) return Response.json({ error: "Vendor products can only be assigned to active orders" }, { status: 400 });
       if (!vendor) return Response.json({ error: "Select a valid vendor" }, { status: 400 });
       if (!product || product.vendorId !== vendorId) return Response.json({ error: "Select a product listed by this vendor" }, { status: 400 });
       if (user.role === "supervisor") {
         const supervisorPerson = await findSessionPerson(db, user);
         if (!supervisorPerson) return Response.json({ error: "Add an active People record with your name and Supervisor role" }, { status: 400 });
-        if (!isOrderSupervisor(order, supervisorPerson.id) || ["Completed", "Cancelled"].includes(order.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
+        if (!isOrderSupervisor(order, supervisorPerson.id) || !isActiveOrder(order)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       }
       const productType = isProductType(product.productType) ? product.productType : "Quantity-wise";
       const measurement = normalizeMeasurement(payload.measurement ?? payload.quantity, productType);
@@ -543,7 +545,7 @@ export async function POST(request: Request) {
           return Response.json({ error: "Vendor or payee cannot be recorded on an expense" }, { status: 400 });
         }
         const [ownedOrder] = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
-        if (!ownedOrder || !isOrderSupervisor(ownedOrder, supervisorPerson.id) || ["Completed", "Cancelled"].includes(ownedOrder.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
+        if (!ownedOrder || !isOrderSupervisor(ownedOrder, supervisorPerson.id) || !isActiveOrder(ownedOrder)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
         personId = supervisorPerson.id;
       }
       const [[order], [person]] = await Promise.all([
@@ -659,7 +661,7 @@ export async function PATCH(request: Request) {
   const type = clean(body.type);
   const id = clean(body.id);
   const payload = body.payload ?? {};
-  if (!id || !["customer", "order", "payment", "vendorProduct"].includes(type)) {
+  if (!id || !["customer", "vendor", "order", "payment", "vendorProduct"].includes(type)) {
     return Response.json({ error: "Select a valid record to edit" }, { status: 400 });
   }
   if (type === "order" && !["admin", "supervisor", "sales"].includes(user.role)) {
@@ -670,6 +672,9 @@ export async function PATCH(request: Request) {
   }
   if (type === "vendorProduct" && !canCreateRecord(user.role, "vendorProduct")) {
     return Response.json({ error: "Your role cannot edit vendor products" }, { status: 403 });
+  }
+  if (type === "vendor" && !canEditVendorProfile(user.role)) {
+    return Response.json({ error: "Your role cannot edit vendor profiles" }, { status: 403 });
   }
   if (type === "customer" && !canEditCustomerProfile(user.role)) {
     return Response.json({ error: "Your role cannot edit customer profiles" }, { status: 403 });
@@ -699,6 +704,24 @@ export async function PATCH(request: Request) {
       };
       await db.update(customers).set(updates).where(eq(customers.id, id));
       return Response.json({ record: { ...existingCustomer, ...updates } });
+    }
+
+    if (type === "vendor") {
+      const missing = required(payload, ["name", "phone"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      const [existingVendor] = await db.select().from(vendors).where(eq(vendors.id, id)).limit(1);
+      if (!existingVendor) return Response.json({ error: "Vendor not found" }, { status: 404 });
+      const updates = {
+        name: clean(payload.name),
+        contactPerson: clean(payload.contactPerson),
+        phone: clean(payload.phone),
+        email: clean(payload.email).toLowerCase(),
+        gstin: clean(payload.gstin),
+        address: clean(payload.address),
+        paymentMode: clean(payload.paymentMode) || "Bank transfer",
+      };
+      await db.update(vendors).set(updates).where(eq(vendors.id, id));
+      return Response.json({ record: { ...existingVendor, ...updates } });
     }
 
     if (type === "vendorProduct") {
@@ -796,13 +819,14 @@ export async function PATCH(request: Request) {
       })),
     ]);
     if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
+    if (existingOrder.status === ARCHIVED_ORDER_STATUS) return Response.json({ error: "Archived orders cannot be edited" }, { status: 403 });
     if (existingOrder.status === "Completed" && user.role !== "admin") {
       return Response.json({ error: "Only an administrator can edit a completed order" }, { status: 403 });
     }
     if (user.role === "supervisor") {
       const supervisorPerson = await findSessionPerson(db, user);
       if (!supervisorPerson) return Response.json({ error: "Add an active People record with your name and Supervisor role" }, { status: 400 });
-      if (!isOrderSupervisor(existingOrder, supervisorPerson.id) || ["Completed", "Cancelled"].includes(existingOrder.status)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
+      if (!isOrderSupervisor(existingOrder, supervisorPerson.id) || !isActiveOrder(existingOrder)) return Response.json({ error: "Supervisor actions require an active assigned order" }, { status: 403 });
       const updates = {
         title: clean(payload.title),
         venue: clean(payload.venue),
@@ -912,8 +936,10 @@ export async function DELETE(request: Request) {
   }
   const type = clean(body.type);
   const id = clean(body.id);
-  if (!id || !["vendorProduct", "expenseCategory"].includes(type)) return Response.json({ error: "Select a valid record to delete" }, { status: 400 });
-  if (!canCreateRecord(user.role, type)) return Response.json({ error: "Your role cannot delete this record" }, { status: 403 });
+  if (!id || !["order", "orderVendor", "vendorProduct", "expenseCategory"].includes(type)) return Response.json({ error: "Select a valid record to delete" }, { status: 400 });
+  if (type === "order" && user.role !== "admin") return Response.json({ error: "Only administrators can delete orders" }, { status: 403 });
+  if (type === "orderVendor" && !["admin", "accountant"].includes(user.role)) return Response.json({ error: "Your role cannot remove vendor assignments" }, { status: 403 });
+  if (["vendorProduct", "expenseCategory"].includes(type) && !canCreateRecord(user.role, type)) return Response.json({ error: "Your role cannot delete this record" }, { status: 403 });
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
     return mongodb.DELETE(request, { userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
@@ -921,6 +947,19 @@ export async function DELETE(request: Request) {
   try {
     await ensureSchema();
     const db = getDb();
+    if (type === "order") {
+      const [order] = await db.select().from(orders).where(eq(orders.id, id)).limit(1);
+      if (!order) return Response.json({ error: "Order not found" }, { status: 404 });
+      if (order.status === ARCHIVED_ORDER_STATUS) return Response.json({ error: "Order is already in history" }, { status: 409 });
+      await db.update(orders).set({ status: ARCHIVED_ORDER_STATUS }).where(eq(orders.id, id));
+      return Response.json({ record: { ...order, status: ARCHIVED_ORDER_STATUS } });
+    }
+    if (type === "orderVendor") {
+      const [assignment] = await db.select().from(orderVendors).where(eq(orderVendors.id, id)).limit(1);
+      if (!assignment) return Response.json({ error: "Vendor assignment not found" }, { status: 404 });
+      await db.delete(orderVendors).where(eq(orderVendors.id, id));
+      return Response.json({ record: assignment });
+    }
     if (type === "expenseCategory") {
       const [category] = await db.select().from(expenseCategories).where(and(eq(expenseCategories.id, id), eq(expenseCategories.status, "Active"))).limit(1);
       if (!category) return Response.json({ error: "Expense category not found" }, { status: 404 });

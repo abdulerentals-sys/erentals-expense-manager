@@ -69,7 +69,7 @@ export function buildCustomerLedger(
   orders: LedgerOrder[],
   payments: LedgerPayment[],
 ): CustomerLedger {
-  const customerOrders = orders.filter((order) => order.customerId === customer.id && order.status !== "Cancelled");
+  const customerOrders = orders.filter((order) => order.customerId === customer.id && !["Cancelled", "Archived"].includes(order.status));
   const orderById = new Map(customerOrders.map((order) => [order.id, order]));
   const customerReceipts = payments.filter((payment) => payment.customerId === customer.id && payment.direction === "Received");
   const openingBalance = wholeAmount(customer.openingBalance);

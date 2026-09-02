@@ -18,6 +18,8 @@ export type DashboardSection =
 export type RecordType = "customer" | "person" | "vendor" | "vendorProduct" | "order" | "orderVendor" | "expense" | "expenseCategory" | "payment";
 export type PaymentDirection = "Received" | "Paid";
 
+const isActiveOrder = (order: Record<string, unknown>) => order.status !== "Completed" && order.status !== "Cancelled" && order.status !== "Archived";
+
 export const roleLabels: Record<UserRole, string> = {
   admin: "Administrator",
   accountant: "Accountant",
@@ -58,6 +60,10 @@ export function canEditCustomerProfile(role: UserRole) {
   return ["admin", "accountant", "sales"].includes(role);
 }
 
+export function canEditVendorProfile(role: UserRole) {
+  return ["admin", "accountant"].includes(role);
+}
+
 export function canRecordPayment(role: UserRole, direction: string): direction is PaymentDirection {
   if (direction === "Received") return ["admin", "accountant", "sales"].includes(role);
   if (direction === "Paid") return ["admin", "accountant"].includes(role);
@@ -88,7 +94,7 @@ export function filterRecordData<T extends Record<string, unknown>>(data: T, rol
     const allOrders = Array.isArray(data.orders) ? data.orders as Array<Record<string, unknown>> : [];
     const supervisorPersonIds = new Set(currentPersonId ? [currentPersonId] : []);
     const ownOrders = allOrders.filter((order) => isOrderSupervisor(order, currentPersonId));
-    const activeOrders = ownOrders.filter((order) => order.status !== "Completed" && order.status !== "Cancelled");
+    const activeOrders = ownOrders.filter(isActiveOrder);
     const activeOrderIds = new Set(activeOrders.map((order) => String(order.id ?? "")));
     const allOrderIds = new Set(ownOrders.map((order) => String(order.id ?? "")));
     const activeSupervisorIds = new Set(activeOrders.flatMap((order) => orderSupervisorIds(order)));
