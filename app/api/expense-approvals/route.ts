@@ -8,6 +8,12 @@ import { expenses, orders, persons, payments } from "../../../db/schema";
 import { isOrderSupervisor } from "../../order-supervisors";
 import { expenseStatus, reimbursementPending } from "../../supervisor-expenses";
 
+type SessionUser = NonNullable<Awaited<ReturnType<typeof getSessionUser>>>;
+type ExpenseRow = { id: string; expenseNo: string; orderId: string; personId: string; category: string; vendor: string; description: string; expenseDate: string; amount: number; paymentMode: string; receiptKey: string; receiptName: string; status?: string; reimbursedAmount?: number; [key: string]: unknown };
+type OrderRow = { id: string; orderNo: string; title: string; venue?: string; customerId?: string; contractValue: number; status?: string; [key: string]: unknown };
+type PersonRow = { id: string; name: string; email: string; role: string; status: string; [key: string]: unknown };
+type PaymentRow = { id: string; orderId: string; personId: string; direction: string; amount: number; paymentDate: string; reference: string; notes: string; [key: string]: unknown };
+
 const now = () => new Date().toISOString();
 const clean = (value: unknown) => String(value ?? "").trim();
 const money = (value: unknown) => Math.max(0, Math.round(Number(value) || 0));
@@ -26,13 +32,11 @@ export async function GET() {
   if (isNetlify()) return getMongoData(user);
   await ensureSchema();
   const db = getDb();
-  const [expenseRows, orderRows, personRows, paymentRows] = await Promise.all([
-    db.select().from(expenses), db.select().from(orders), db.select().from(persons), db.select().from(payments),
-  ]);
-  return buildResponse(user, expenseRows, orderRows, personRows, paymentRows);
+  const [expenseRows, orderRows, personRows, paymentRows] = await Promise.all([db.select().from(expenses), db.select().from(orders), db.select().from(persons), db.select().from(payments)]);
+  return buildResponse(user, expenseRows as unknown as ExpenseRow[], orderRows as unknown as OrderRow[], personRows as unknown as PersonRow[], paymentRows as unknown as PaymentRow[]);
 }
 
-function buildResponse(user: Awaited<ReturnType<typeof getSessionUser>> extends infer U ? NonNullable<U> : never, expenseRows: any[], orderRows: any[], personRows: any[], paymentRows: any[]) {
+function buildResponse(user: SessionUser, expenseRows: ExpenseRow[], orderRows: OrderRow[], personRows: PersonRow[], paymentRows: PaymentRow[]) {
   const people = personRows.map((person) => ({ id: String(person.id), name: String(person.name), email: String(person.email), role: String(person.role), status: String(person.status) }));
   const currentPersonId = resolveUserPersonId(people, { personId: user.personId, name: user.name, email: user.email, role: user.role });
   const orderMap = new Map(orderRows.map((order) => [String(order.id), order]));
@@ -48,15 +52,13 @@ function buildResponse(user: Awaited<ReturnType<typeof getSessionUser>> extends 
   return Response.json({ expenses: rows, orders: ownOrders.map((order) => ({ id: order.id, orderNo: order.orderNo, title: order.title, contractValue: user.role === "supervisor" ? 0 : order.contractValue })), payments: paymentRows.filter((payment) => ["Reimbursement", "Supervisor reimbursement"].includes(payment.direction) && (user.role !== "supervisor" || String(payment.personId) === String(currentPersonId))), supervisorId: currentPersonId || "", supervisorName: personMap.get(currentPersonId || "")?.name || user.name });
 }
 
-async function getMongoData(user: NonNullable<Awaited<ReturnType<typeof getSessionUser>>>) {
+async function getMongoData(user: SessionUser) {
   const { MongoClient } = await import("mongodb");
   const client = new MongoClient(process.env.MONGODB_URI as string);
   await client.connect();
   try {
     const db = client.db();
-    const [expenseRows, orderRows, personRows, paymentRows] = await Promise.all([
-      db.collection("expenses").find({}).toArray(), db.collection("orders").find({}).toArray(), db.collection("persons").find({}).toArray(), db.collection("payments").find({}).toArray(),
-    ]);
+    const [expenseRows, orderRows, personRows, paymentRows] = await Promise.all([db.collection<ExpenseRow>("expenses").find({}).toArray(), db.collection<OrderRow>("orders").find({}).toArray(), db.collection<PersonRow>("persons").find({}).toArray(), db.collection<PaymentRow>("payments").find({}).toArray()]);
     return buildResponse(user, expenseRows, orderRows, personRows, paymentRows);
   } finally { await client.close(); }
 }
@@ -85,21 +87,18 @@ export async function POST(request: Request) {
   const pending = reimbursementPending(expense.amount, expense.reimbursedAmount);
   const amount = money(body.amount) || pending;
   if (!amount || amount > pending) return Response.json({ error: `Reimbursement cannot exceed ${pending}` }, { status: 400 });
-  await db.batch([
-    db.update(expenses).set({ reimbursedAmount: money(expense.reimbursedAmount) + amount }).where(eq(expenses.id, expenseId)),
-    db.insert(payments).values({ id: crypto.randomUUID(), orderId: expense.orderId, manualOrderId: "", personId: expense.personId, vendorId: "", invoiceId: "", customerId: "", direction: "Reimbursement", amount, paymentDate: now().slice(0, 10), method: expense.paymentMode || "Bank transfer", reference: "", notes: `Supervisor expense reimbursement ${expense.expenseNo}`, createdAt: now() }),
-  ]);
+  await db.batch([db.update(expenses).set({ reimbursedAmount: money(expense.reimbursedAmount) + amount }).where(eq(expenses.id, expenseId)), db.insert(payments).values({ id: crypto.randomUUID(), orderId: expense.orderId, manualOrderId: "", personId: expense.personId, vendorId: "", invoiceId: "", customerId: "", direction: "Reimbursement", amount, paymentDate: now().slice(0, 10), method: expense.paymentMode || "Bank transfer", reference: "", notes: `Supervisor expense reimbursement ${expense.expenseNo}`, createdAt: now() })]);
   return Response.json({ ok: true });
 }
 
-async function mutateMongo(user: NonNullable<Awaited<ReturnType<typeof getSessionUser>>>, action: string, expenseId: string, requestedAmount: number) {
+async function mutateMongo(user: SessionUser, action: string, expenseId: string, requestedAmount: number) {
   const { MongoClient } = await import("mongodb");
   const client = new MongoClient(process.env.MONGODB_URI as string);
   await client.connect();
   try {
     const db = client.db();
-    const expensesCollection = db.collection("expenses");
-    const paymentsCollection = db.collection("payments");
+    const expensesCollection = db.collection<ExpenseRow>("expenses");
+    const paymentsCollection = db.collection<PaymentRow>("payments");
     const expense = await expensesCollection.findOne({ id: expenseId });
     if (!expense) return Response.json({ error: "Expense not found" }, { status: 404 });
     if (action === "approve" || action === "disapprove") {
