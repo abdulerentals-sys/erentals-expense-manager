@@ -13,5 +13,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node --test tests/supervisor-expense-contract.test.mjs
-      - run: npm run lint
+      - name: Lint
+        run: |
+          set +e
+          npm run lint > lint-output.txt 2>&1
+          status=$?
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add lint-output.txt
+          git diff --cached --quiet || git commit -m "[lint-debug] capture lint output"
+          git push
+          exit $status
       - run: npm run build:netlify
