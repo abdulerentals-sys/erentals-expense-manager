@@ -1,3 +1,5 @@
+import type { ExpenseFundingSource } from "./payment-accounts";
+
 export type SupervisorExpenseStatus = "Pending approval" | "Approved" | "Disapproved";
 
 export type SupervisorExpenseRow = {
@@ -13,6 +15,9 @@ export type SupervisorExpenseRow = {
   expenseDate: string;
   amount: number;
   paymentMode: string;
+  fundingSource: ExpenseFundingSource;
+  paymentAccountId: string;
+  paymentAccountName: string;
   status: SupervisorExpenseStatus;
   reimbursedAmount: number;
 };
@@ -36,8 +41,8 @@ export function reimbursementTotal(rows: Array<Pick<SupervisorExpenseRow, "reimb
   return rows.reduce((sum, row) => sum + Math.max(0, row.reimbursedAmount), 0);
 }
 
-export function pendingReimbursementTotal(rows: Array<Pick<SupervisorExpenseRow, "amount" | "status" | "reimbursedAmount">>) {
-  return rows.reduce((sum, row) => sum + (row.status === "Approved" ? reimbursementPending(row.amount, row.reimbursedAmount) : 0), 0);
+export function pendingReimbursementTotal(rows: Array<Pick<SupervisorExpenseRow, "amount" | "status" | "reimbursedAmount"> & Partial<Pick<SupervisorExpenseRow, "fundingSource">>>) {
+  return rows.reduce((sum, row) => sum + (row.status === "Approved" && String(row.fundingSource ?? "Reimbursement").toLowerCase() !== "account" ? reimbursementPending(row.amount, row.reimbursedAmount) : 0), 0);
 }
 
 export function orderExpenseTotal(rows: Array<Pick<SupervisorExpenseRow, "orderId" | "amount" | "status">>, orderId: string) {

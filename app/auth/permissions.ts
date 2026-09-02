@@ -15,7 +15,7 @@ export type DashboardSection =
   | "settings"
   | "users";
 
-export type RecordType = "customer" | "person" | "vendor" | "vendorProduct" | "order" | "orderVendor" | "expense" | "expenseCategory" | "payment";
+export type RecordType = "customer" | "person" | "vendor" | "vendorProduct" | "order" | "orderVendor" | "expense" | "expenseCategory" | "paymentAccount" | "payment";
 export type PaymentDirection = "Received" | "Paid";
 
 const isActiveOrder = (order: Record<string, unknown>) => order.status !== "Completed" && order.status !== "Cancelled" && order.status !== "Archived";
@@ -42,7 +42,7 @@ const sectionsByRole: Record<UserRole, DashboardSection[]> = {
 };
 
 const recordsByRole: Record<UserRole, RecordType[]> = {
-  admin: ["customer", "person", "vendor", "vendorProduct", "order", "orderVendor", "expense", "expenseCategory", "payment"],
+  admin: ["customer", "person", "vendor", "vendorProduct", "order", "orderVendor", "expense", "expenseCategory", "paymentAccount", "payment"],
   accountant: ["customer", "vendor", "vendorProduct", "orderVendor", "expense", "payment"],
   supervisor: ["person", "orderVendor", "expense"],
   sales: ["customer", "person", "order", "payment"],

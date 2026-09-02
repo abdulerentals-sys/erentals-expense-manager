@@ -35,7 +35,9 @@ export async function POST(request: Request) {
   }
   const canUpload = kind === "expense"
     ? canCreateRecord(user.role, kind)
-    : kind === "order" && ["admin", "sales"].includes(user.role);
+    : kind === "payment"
+      ? ["admin", "accountant", "sales"].includes(user.role)
+      : kind === "order" && ["admin", "sales"].includes(user.role);
   if (!canUpload) {
     return Response.json({ error: "Your role cannot upload this document" }, { status: 403 });
   }

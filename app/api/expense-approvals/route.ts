@@ -4,15 +4,16 @@ import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
 import { ensureSchema } from "../../../db/ensure";
 import { getDb } from "../../../db";
-import { expenses, orders, persons, payments } from "../../../db/schema";
+import { expenses, orders, paymentAccounts, persons, payments } from "../../../db/schema";
 import { isOrderSupervisor, type OrderSupervisorFields } from "../../order-supervisors";
+import { expenseFundingSource, expenseNeedsReimbursement } from "../../payment-accounts";
 import { expenseStatus, reimbursementPending } from "../../supervisor-expenses";
 
 type SessionUser = NonNullable<Awaited<ReturnType<typeof getSessionUser>>>;
-type ExpenseRow = { id: string; expenseNo: string; orderId: string; personId: string; category: string; vendor: string; description: string; expenseDate: string; amount: number; paymentMode: string; receiptKey: string; receiptName: string; status?: string; reimbursedAmount?: number; [key: string]: unknown };
+type ExpenseRow = { id: string; expenseNo: string; orderId: string; personId: string; category: string; vendor: string; description: string; expenseDate: string; amount: number; paymentMode: string; receiptKey: string; receiptName: string; fundingSource?: string; paymentAccountId?: string; paymentAccountName?: string; status?: string; reimbursedAmount?: number; [key: string]: unknown };
 type OrderRow = OrderSupervisorFields & { id: string; orderNo: string; title: string; venue?: string; customerId?: string; contractValue: number; status?: string; [key: string]: unknown };
 type PersonRow = { id: string; name: string; email: string; role: string; status: string; [key: string]: unknown };
-type PaymentRow = { id: string; orderId: string; personId: string; direction: string; amount: number; paymentDate: string; reference: string; notes: string; [key: string]: unknown };
+type PaymentRow = { id: string; orderId: string; personId: string; direction: string; amount: number; paymentDate: string; method?: string; reference: string; notes: string; paymentAccountId?: string; paymentAccountName?: string; receiptKey?: string; receiptName?: string; [key: string]: unknown };
 
 const now = () => new Date().toISOString();
 const clean = (value: unknown) => String(value ?? "").trim();
@@ -26,7 +27,7 @@ function allowedAction(role: UserRole, action: string) {
 }
 
 function isSubmittedSupervisorExpense(expense: ExpenseRow, order: OrderRow | null | undefined, person: PersonRow | null | undefined) {
-  return isOrderTeamPerson(person, "supervisor") && isOrderSupervisor(order, String(expense.personId));
+  return expenseNeedsReimbursement(expense) && isOrderTeamPerson(person, "supervisor") && isOrderSupervisor(order, String(expense.personId));
 }
 
 export async function GET() {
@@ -57,7 +58,7 @@ function buildResponse(user: SessionUser, expenseRows: ExpenseRow[], orderRows: 
     const order = orderMap.get(String(expense.orderId));
     const person = personMap.get(String(expense.personId));
     const reimbursedAmount = money(expense.reimbursedAmount);
-    return { ...expense, status: expenseStatus(expense.status), reimbursedAmount, orderNo: order?.orderNo || "", orderTitle: order?.title || order?.venue || "", supervisorId: String(expense.personId || ""), supervisorName: person?.name || "" };
+    return { ...expense, fundingSource: expenseFundingSource(expense.fundingSource), status: expenseStatus(expense.status), reimbursedAmount, orderNo: order?.orderNo || "", orderTitle: order?.title || order?.venue || "", supervisorId: String(expense.personId || ""), supervisorName: person?.name || "" };
   });
   return Response.json({ expenses: rows, orders: ownOrders.map((order) => ({ id: order.id, orderNo: order.orderNo, title: order.title, contractValue: user.role === "supervisor" ? 0 : order.contractValue })), payments: paymentRows.filter((payment) => ["Reimbursement", "Supervisor reimbursement"].includes(payment.direction) && (user.role !== "supervisor" || String(payment.personId) === String(currentPersonId))), supervisorId: currentPersonId || "", supervisorName: personMap.get(currentPersonId || "")?.name || user.name });
 }
@@ -77,13 +78,13 @@ export async function POST(request: Request) {
   const user = await getSessionUser();
   if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
   if (user.mustChangePassword) return Response.json({ error: "Change your temporary password before using the dashboard" }, { status: 403 });
-  let body: { action?: string; expenseId?: string; amount?: number };
+  let body: { action?: string; expenseId?: string; amount?: number; paymentAccountId?: string; method?: string; reference?: string; receiptKey?: string; receiptName?: string };
   try { body = await request.json(); } catch { return Response.json({ error: "Invalid request" }, { status: 400 }); }
   const action = clean(body.action);
   const expenseId = clean(body.expenseId);
   if (!allowedAction(user.role, action)) return Response.json({ error: "Your role cannot perform this action" }, { status: 403 });
   if (!expenseId) return Response.json({ error: "Expense ID is required" }, { status: 400 });
-  if (isNetlify()) return mutateMongo(user, action, expenseId, money(body.amount));
+  if (isNetlify()) return mutateMongo(user, action, expenseId, money(body.amount), body);
   await ensureSchema();
   const db = getDb();
   const [expenseRows, orderRows, personRows] = await Promise.all([
@@ -106,11 +107,14 @@ export async function POST(request: Request) {
   const pending = reimbursementPending(expense.amount, expense.reimbursedAmount);
   const amount = money(body.amount) || pending;
   if (!amount || amount > pending) return Response.json({ error: `Reimbursement cannot exceed ${pending}` }, { status: 400 });
-  await db.batch([db.update(expenses).set({ reimbursedAmount: money(expense.reimbursedAmount) + amount }).where(eq(expenses.id, expenseId)), db.insert(payments).values({ id: crypto.randomUUID(), orderId: expense.orderId, manualOrderId: "", personId: expense.personId, vendorId: "", invoiceId: "", customerId: "", direction: "Reimbursement", amount, paymentDate: now().slice(0, 10), method: expense.paymentMode || "Bank transfer", reference: "", notes: `Supervisor expense reimbursement ${expense.expenseNo}`, createdAt: now() })]);
+  const paymentAccountId = clean(body.paymentAccountId);
+  const [paymentAccount] = paymentAccountId ? await db.select().from(paymentAccounts).where(eq(paymentAccounts.id, paymentAccountId)).limit(1) : [];
+  if (!paymentAccount || paymentAccount.status !== "Active") return Response.json({ error: "Select an active reimbursement account" }, { status: 400 });
+  await db.batch([db.update(expenses).set({ reimbursedAmount: money(expense.reimbursedAmount) + amount }).where(eq(expenses.id, expenseId)), db.insert(payments).values({ id: crypto.randomUUID(), orderId: expense.orderId, manualOrderId: "", personId: expense.personId, vendorId: "", invoiceId: "", customerId: "", direction: "Reimbursement", amount, paymentDate: now().slice(0, 10), method: clean(body.method) || "Bank transfer", reference: clean(body.reference), notes: `Supervisor expense reimbursement ${expense.expenseNo}`, paymentAccountId, paymentAccountName: paymentAccount.name, receiptKey: clean(body.receiptKey), receiptName: clean(body.receiptName), createdAt: now() })]);
   return Response.json({ ok: true });
 }
 
-async function mutateMongo(user: SessionUser, action: string, expenseId: string, requestedAmount: number) {
+async function mutateMongo(user: SessionUser, action: string, expenseId: string, requestedAmount: number, body: { paymentAccountId?: string; method?: string; reference?: string; receiptKey?: string; receiptName?: string }) {
   const { MongoClient } = await import("mongodb");
   const client = new MongoClient(process.env.MONGODB_URI as string);
   await client.connect();
@@ -134,8 +138,11 @@ async function mutateMongo(user: SessionUser, action: string, expenseId: string,
     const pending = reimbursementPending(Number(expense.amount), Number(expense.reimbursedAmount));
     const amount = requestedAmount || pending;
     if (!amount || amount > pending) return Response.json({ error: `Reimbursement cannot exceed ${pending}` }, { status: 400 });
+    const paymentAccountId = clean(body.paymentAccountId);
+    const paymentAccount = paymentAccountId ? await db.collection("payment_accounts").findOne({ id: paymentAccountId, status: "Active" }) : null;
+    if (!paymentAccount) return Response.json({ error: "Select an active reimbursement account" }, { status: 400 });
     await expensesCollection.updateOne({ id: expenseId }, { $set: { reimbursedAmount: Number(expense.reimbursedAmount || 0) + amount } });
-    await paymentsCollection.insertOne({ id: crypto.randomUUID(), orderId: expense.orderId, manualOrderId: "", personId: expense.personId, vendorId: "", invoiceId: "", customerId: "", direction: "Reimbursement", amount, paymentDate: now().slice(0, 10), method: expense.paymentMode || "Bank transfer", reference: "", notes: `Supervisor expense reimbursement ${expense.expenseNo}`, createdAt: now() });
+    await paymentsCollection.insertOne({ id: crypto.randomUUID(), orderId: expense.orderId, manualOrderId: "", personId: expense.personId, vendorId: "", invoiceId: "", customerId: "", direction: "Reimbursement", amount, paymentDate: now().slice(0, 10), method: clean(body.method) || "Bank transfer", reference: clean(body.reference), notes: `Supervisor expense reimbursement ${expense.expenseNo}`, paymentAccountId, paymentAccountName: clean(paymentAccount.name), receiptKey: clean(body.receiptKey), receiptName: clean(body.receiptName), createdAt: now() });
     return Response.json({ ok: true });
   } finally { await client.close(); }
 }

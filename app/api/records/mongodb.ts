@@ -11,6 +11,7 @@ import type { UserRole } from "../../auth/types";
 import { createExpenseNumber, expenseCategoryKey, isAllowedExpenseCategory, isBuiltInExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
 import { isOrderSupervisor, normalizeSupervisorIds, orderSupervisorIds } from "../../order-supervisors";
 import { ARCHIVED_ORDER_STATUS, isActiveOrder } from "../../order-lifecycle";
+import { DEFAULT_PAYMENT_ACCOUNTS, expenseFundingSource, paymentAccountKey, type ExpenseFundingSource, type PaymentAccountRecord } from "../../payment-accounts";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis, type ProductType } from "../../vendor-pricing";
 
 type Payload = Record<string, unknown>;
@@ -110,6 +111,15 @@ type Expense = {
   paymentMode: string;
   receiptKey: string;
   receiptName: string;
+  fundingSource?: ExpenseFundingSource;
+  paymentAccountId?: string;
+  paymentAccountName?: string;
+  status?: string;
+  approvedAt?: string;
+  approvedBy?: string;
+  disapprovedAt?: string;
+  disapprovedBy?: string;
+  reimbursedAmount?: number;
   createdAt: string;
 };
 
@@ -127,6 +137,10 @@ type Payment = {
   method: string;
   reference: string;
   notes: string;
+  paymentAccountId?: string;
+  paymentAccountName?: string;
+  receiptKey?: string;
+  receiptName?: string;
   createdAt: string;
 };
 
@@ -141,6 +155,7 @@ type Collections = {
   invoices: Collection<Invoice>;
   expenses: Collection<Expense>;
   expenseCategories: Collection<ExpenseCategoryRecord>;
+  paymentAccounts: Collection<PaymentAccountRecord>;
   payments: Collection<Payment>;
 };
 
@@ -271,6 +286,7 @@ function getCollections(db: Db): Collections {
     invoices: db.collection<Invoice>("invoices"),
     expenses: db.collection<Expense>("expenses"),
     expenseCategories: db.collection<ExpenseCategoryRecord>("expense_categories"),
+    paymentAccounts: db.collection<PaymentAccountRecord>("payment_accounts"),
     payments: db.collection<Payment>("payments"),
   };
 }
@@ -295,6 +311,12 @@ function ensureMongoIndexes(collections: Collections) {
       collections.expenses.createIndex({ orderId: 1 }),
       collections.expenses.createIndex({ expenseDate: -1 }),
       collections.expenseCategories.createIndex({ nameKey: 1 }, { unique: true }),
+      collections.paymentAccounts.createIndex({ nameKey: 1 }, { unique: true }),
+      ...DEFAULT_PAYMENT_ACCOUNTS.map((account) => collections.paymentAccounts.updateOne(
+        { id: account.id },
+        { $setOnInsert: { id: account.id, name: account.name, nameKey: paymentAccountKey(account.name), status: "Active", createdAt: now() } },
+        { upsert: true },
+      )),
       collections.payments.createIndex({ customerId: 1 }),
       collections.payments.createIndex({ orderId: 1 }),
       collections.payments.createIndex({ personId: 1 }),
@@ -340,7 +362,7 @@ export async function GET() {
   try {
     const { collections } = await getMongoDatabase();
     const options = { projection: { _id: 0 } };
-    const [customers, persons, vendors, vendorProducts, orders, orderProducts, orderVendors, invoices, expenses, expenseCategories, payments] = await Promise.all([
+    const [customers, persons, vendors, vendorProducts, orders, orderProducts, orderVendors, invoices, expenses, expenseCategories, paymentAccounts, payments] = await Promise.all([
       collections.customers.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.persons.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.vendors.find({}, options).sort({ createdAt: -1 }).toArray(),
@@ -351,6 +373,7 @@ export async function GET() {
       collections.invoices.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.expenses.find({}, options).sort({ createdAt: -1 }).toArray(),
       collections.expenseCategories.find({ status: "Active" }, options).sort({ name: 1 }).toArray(),
+      collections.paymentAccounts.find({ status: "Active" }, options).sort({ name: 1 }).toArray(),
       collections.payments.find({}, options).sort({ createdAt: -1 }).toArray(),
     ]);
     const orderByInvoice = new Map(invoices.map((invoice) => [invoice.id, invoice.orderId]));
@@ -379,7 +402,7 @@ export async function GET() {
       attachmentType: order.attachmentType || "",
       supervisorIds: orderSupervisorIds(order),
     }));
-    return Response.json({ customers, persons, vendors, vendorProducts, orders: normalizedOrders, orderProducts, orderVendors, invoices, expenses, expenseCategories, payments: normalizedPayments });
+    return Response.json({ customers, persons, vendors, vendorProducts, orders: normalizedOrders, orderProducts, orderVendors, invoices, expenses, expenseCategories, paymentAccounts, payments: normalizedPayments });
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : "Unable to load records" },
@@ -479,6 +502,22 @@ export async function POST(request: Request, context: RequestContext = { userRol
       }
       const row: ExpenseCategoryRecord = { id: crypto.randomUUID(), name, nameKey, status: "Active", createdAt };
       await collections.expenseCategories.insertOne(row);
+      return Response.json({ record: row }, { status: 201 });
+    }
+
+    if (type === "paymentAccount") {
+      const name = clean(payload.name).replace(/\s+/g, " ");
+      if (!name) throw new FormError("Account name is required");
+      if (name.length > 80) throw new FormError("Account name must be 80 characters or fewer");
+      const nameKey = paymentAccountKey(name);
+      const existing = await collections.paymentAccounts.findOne({ nameKey }, { projection: { _id: 0 } });
+      if (existing?.status === "Active") throw new FormError("That payment account already exists");
+      if (existing) {
+        await collections.paymentAccounts.updateOne({ id: existing.id }, { $set: { name, status: "Active" } });
+        return Response.json({ record: { ...existing, name, status: "Active" } }, { status: 201 });
+      }
+      const row: PaymentAccountRecord = { id: crypto.randomUUID(), name, nameKey, status: "Active", createdAt };
+      await collections.paymentAccounts.insertOne(row);
       return Response.json({ record: row }, { status: 201 });
     }
 
@@ -736,6 +775,14 @@ export async function POST(request: Request, context: RequestContext = { userRol
       if (!amount) {
         return Response.json({ error: "Expense amount must be greater than zero" }, { status: 400 });
       }
+      const rawFundingSource = clean(payload.fundingSource);
+      if (rawFundingSource && !["Reimbursement", "Account"].includes(rawFundingSource)) throw new FormError("Select a valid expense funding source");
+      const fundingSource = expenseFundingSource(rawFundingSource);
+      const paymentAccountId = fundingSource === "Account" ? clean(payload.paymentAccountId) : "";
+      const paymentAccount = paymentAccountId
+        ? await collections.paymentAccounts.findOne({ id: paymentAccountId, status: "Active" }, { projection: { _id: 0 } })
+        : null;
+      if (fundingSource === "Account" && !paymentAccount) throw new FormError("Select an active company payment account");
       const row: Expense = {
         id: crypto.randomUUID(),
         expenseNo: createExpenseNumber(new Date(createdAt)),
@@ -750,6 +797,11 @@ export async function POST(request: Request, context: RequestContext = { userRol
         paymentMode: clean(payload.paymentMode) || "UPI",
         receiptKey: clean(payload.receiptKey),
         receiptName: clean(payload.receiptName),
+        fundingSource,
+        paymentAccountId,
+        paymentAccountName: paymentAccount?.name || "",
+        status: fundingSource === "Account" ? "Approved" : "Pending approval",
+        reimbursedAmount: 0,
         createdAt,
       };
       await collections.expenses.insertOne(row);
@@ -770,6 +822,11 @@ export async function POST(request: Request, context: RequestContext = { userRol
       if (!amount) {
         return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
       }
+      const paymentAccountId = clean(payload.paymentAccountId);
+      const paymentAccount = paymentAccountId
+        ? await collections.paymentAccounts.findOne({ id: paymentAccountId, status: "Active" }, { projection: { _id: 0 } })
+        : null;
+      if (!paymentAccount) throw new FormError("Select an active payment account");
 
       const personId = "";
       const customerId = direction === "Received" ? clean(payload.customerId) : "";
@@ -799,7 +856,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
       }
       const rows: Payment[] = (manualOrderId ? [{ orderId: "", amount }] : allocations).map((allocation, index) => ({
         id: crypto.randomUUID(), orderId: allocation.orderId, manualOrderId, personId, vendorId, invoiceId: "", customerId: direction === "Received" ? customerId : linkedOrders[index]!.customerId, direction, amount: allocation.amount,
-        paymentDate: clean(payload.paymentDate), method: clean(payload.method), reference: clean(payload.reference), notes: clean(payload.notes), createdAt,
+        paymentDate: clean(payload.paymentDate), method: clean(payload.method), reference: clean(payload.reference), notes: clean(payload.notes), paymentAccountId, paymentAccountName: paymentAccount.name, receiptKey: clean(payload.receiptKey), receiptName: clean(payload.receiptName), createdAt,
       }));
       await collections.payments.insertMany(rows);
       return Response.json({ records: rows }, { status: 201 });
@@ -823,7 +880,7 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
     const type = clean(body.type);
     const id = clean(body.id);
     const payload = body.payload ?? {};
-    if (!id || !["customer", "vendor", "order", "payment", "vendorProduct"].includes(type)) {
+    if (!id || !["customer", "vendor", "order", "payment", "vendorProduct", "paymentAccount"].includes(type)) {
       return Response.json({ error: "Select a valid record to edit" }, { status: 400 });
     }
     const userRole = context.userRole;
@@ -845,6 +902,9 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
     }
     if (type === "customer" && !canEditCustomerProfile(userRole)) {
       return Response.json({ error: "Your role cannot edit customer profiles" }, { status: 403 });
+    }
+    if (type === "paymentAccount" && userRole !== "admin") {
+      return Response.json({ error: "Only administrators can edit payment accounts" }, { status: 403 });
     }
 
     const { client, collections } = await getMongoDatabase();
@@ -906,6 +966,20 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       return Response.json({ record: { ...existingProduct, ...updates } });
     }
 
+    if (type === "paymentAccount") {
+      const name = clean(payload.name).replace(/\s+/g, " ");
+      if (!name) throw new FormError("Account name is required");
+      if (name.length > 80) throw new FormError("Account name must be 80 characters or fewer");
+      const existingAccount = await collections.paymentAccounts.findOne({ id, status: "Active" }, { projection: { _id: 0 } });
+      if (!existingAccount) return Response.json({ error: "Payment account not found" }, { status: 404 });
+      const nameKey = paymentAccountKey(name);
+      const duplicate = await collections.paymentAccounts.findOne({ nameKey, id: { $ne: id } }, { projection: { _id: 0, id: 1 } });
+      if (duplicate) throw new FormError("That payment account already exists");
+      const updates = { name, nameKey };
+      await collections.paymentAccounts.updateOne({ id }, { $set: updates });
+      return Response.json({ record: { ...existingAccount, ...updates } });
+    }
+
     if (type === "payment") {
       const missing = required(payload, ["direction", "amount", "paymentDate", "method"]);
       if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
@@ -917,18 +991,21 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       const orderId = manualOrderId ? "" : clean(payload.orderId);
       const customerId = direction === "Received" ? clean(payload.customerId) : "";
       const vendorId = direction === "Paid" ? clean(payload.vendorId) : "";
+      const paymentAccountId = clean(payload.paymentAccountId);
       const amount = money(payload.amount);
       if (rawManualOrderId && direction !== "Received") throw new FormError("Manual Order ID is only available for customer receipts");
       if (manualOrderId && clean(payload.orderId) && clean(payload.orderId) !== "__manual__") throw new FormError("Choose either a listed order or a manual Order ID");
       if (!manualOrderId && (!orderId || orderId === "__manual__")) throw new FormError("Select an order or enter a manual Order ID");
       if (!amount) return Response.json({ error: "Payment amount must be greater than zero" }, { status: 400 });
-      const [existingPayment, order, customer, vendor] = await Promise.all([
+      const [existingPayment, order, customer, vendor, paymentAccount] = await Promise.all([
         findById(collections.payments, id),
         orderId ? findById(collections.orders, orderId) : Promise.resolve(null),
         customerId ? findById(collections.customers, customerId) : Promise.resolve(null),
         vendorId ? findById(collections.vendors, vendorId) : Promise.resolve(null),
+        paymentAccountId ? collections.paymentAccounts.findOne({ id: paymentAccountId, status: "Active" }, { projection: { _id: 0 } }) : Promise.resolve(null),
       ]);
       if (!existingPayment) return Response.json({ error: "Payment not found" }, { status: 404 });
+      if (!paymentAccount) return Response.json({ error: "Select an active payment account" }, { status: 400 });
       if (userRole === "sales" && existingPayment.direction !== "Received") return Response.json({ error: "Your role cannot edit this payment" }, { status: 403 });
       if (!manualOrderId && !order) return Response.json({ error: "Select a valid order" }, { status: 400 });
       if (direction === "Received") {
@@ -951,6 +1028,10 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
         method: clean(payload.method),
         reference: clean(payload.reference),
         notes: clean(payload.notes),
+        paymentAccountId,
+        paymentAccountName: paymentAccount.name,
+        receiptKey: clean(payload.receiptKey) || existingPayment.receiptKey || "",
+        receiptName: clean(payload.receiptName) || existingPayment.receiptName || "",
       };
       await collections.payments.updateOne({ id }, { $set: updates });
       return Response.json({ record: { ...existingPayment, ...updates } });
@@ -1088,11 +1169,12 @@ export async function DELETE(request: Request, context: RequestContext = { userR
     const body = (await request.json()) as { type?: string; id?: string };
     const type = clean(body.type);
     const id = clean(body.id);
-    if (!id || !["order", "orderVendor", "vendorProduct", "expenseCategory"].includes(type)) return Response.json({ error: "Select a valid record to delete" }, { status: 400 });
+    if (!id || !["order", "orderVendor", "vendorProduct", "expenseCategory", "paymentAccount"].includes(type)) return Response.json({ error: "Select a valid record to delete" }, { status: 400 });
     if (type === "order" && context.userRole !== "admin") return Response.json({ error: "Only administrators can delete orders" }, { status: 403 });
     if (type === "orderVendor" && !["admin", "accountant"].includes(context.userRole)) return Response.json({ error: "Your role cannot remove vendor assignments" }, { status: 403 });
     if (type === "vendorProduct" && !["admin", "accountant"].includes(context.userRole)) return Response.json({ error: "Your role cannot delete vendor products" }, { status: 403 });
     if (type === "expenseCategory" && context.userRole !== "admin") return Response.json({ error: "Only administrators can delete expense categories" }, { status: 403 });
+    if (type === "paymentAccount" && context.userRole !== "admin") return Response.json({ error: "Only administrators can delete payment accounts" }, { status: 403 });
     const { collections } = await getMongoDatabase();
     if (type === "order") {
       const order = await collections.orders.findOne({ id }, { projection: { _id: 0 } });
@@ -1112,6 +1194,12 @@ export async function DELETE(request: Request, context: RequestContext = { userR
       if (!category) return Response.json({ error: "Expense category not found" }, { status: 404 });
       await collections.expenseCategories.updateOne({ id }, { $set: { status: "Deleted" } });
       return Response.json({ record: { ...category, status: "Deleted" } });
+    }
+    if (type === "paymentAccount") {
+      const account = await collections.paymentAccounts.findOne({ id, status: "Active" }, { projection: { _id: 0 } });
+      if (!account) return Response.json({ error: "Payment account not found" }, { status: 404 });
+      await collections.paymentAccounts.updateOne({ id }, { $set: { status: "Deleted" } });
+      return Response.json({ record: { ...account, status: "Deleted" } });
     }
     const product = await collections.vendorProducts.findOne({ id, status: { $ne: "Deleted" } }, { projection: { _id: 0 } });
     if (!product) return Response.json({ error: "Vendor product not found" }, { status: 404 });
