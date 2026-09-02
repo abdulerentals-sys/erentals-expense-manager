@@ -19,6 +19,7 @@ test("customer ledger calculates dated Tally-style debits, credits, and running 
   const orders = [
     { id: "order-1", orderNo: "ORD-0001", title: "Annual meet", venue: "BKC", customerId: "customer-1", eventDate: "2026-01-10", contractValue: 10000, status: "Completed", createdAt: "2026-01-02T10:00:00.000Z" },
     { id: "order-2", orderNo: "ORD-0002", title: "Cancelled meet", venue: "NESCO", customerId: "customer-1", eventDate: "2026-01-15", contractValue: 5000, status: "Cancelled", createdAt: "2026-01-03T10:00:00.000Z" },
+    { id: "order-3", orderNo: "ORD-0003", title: "Archived meet", venue: "Pune", customerId: "customer-1", eventDate: "2026-01-18", contractValue: 7000, status: "Archived", createdAt: "2026-01-04T10:00:00.000Z" },
   ];
   const payments = [
     { id: "payment-1", orderId: "order-1", manualOrderId: "", customerId: "customer-1", direction: "Received", amount: 2500, paymentDate: "2026-01-12", method: "UPI", reference: "UTR-1", notes: "Part payment" },

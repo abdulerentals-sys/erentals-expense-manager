@@ -5,11 +5,12 @@ import {
   type Collection,
   type Filter,
 } from "mongodb";
-import { canEditCustomerProfile } from "../../auth/permissions";
+import { canEditCustomerProfile, canEditVendorProfile } from "../../auth/permissions";
 import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
 import { createExpenseNumber, expenseCategoryKey, isAllowedExpenseCategory, isBuiltInExpenseCategory, isExpenseResponsiblePerson } from "../../expense-rules";
 import { isOrderSupervisor, normalizeSupervisorIds, orderSupervisorIds } from "../../order-supervisors";
+import { ARCHIVED_ORDER_STATUS, isActiveOrder } from "../../order-lifecycle";
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis, type ProductType } from "../../vendor-pricing";
 
 type Payload = Record<string, unknown>;
@@ -422,7 +423,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
         const supervisorPerson = await findSessionPerson(collections, context);
         if (!supervisorPerson) throw new FormError("Add an active People record with your name and Supervisor role");
         const ownedOrder = await collections.orders.findOne({ id: orderId }, { projection: { _id: 0 } });
-        if (!ownedOrder || !isOrderSupervisor(ownedOrder, supervisorPerson.id) || ["Completed", "Cancelled"].includes(ownedOrder.status)) throw new FormError("Supervisor actions require an active assigned order");
+        if (!ownedOrder || !isOrderSupervisor(ownedOrder, supervisorPerson.id) || !isActiveOrder(ownedOrder)) throw new FormError("Supervisor actions require an active assigned order");
       }
       const row: Person = {
         id: crypto.randomUUID(),
@@ -594,11 +595,12 @@ export async function POST(request: Request, context: RequestContext = { userRol
       const orderId = clean(payload.orderId); const vendorId = clean(payload.vendorId); const productId = clean(payload.productId);
       const [order, vendor, product] = await Promise.all([findById(collections.orders, orderId), findById(collections.vendors, vendorId), findById(collections.vendorProducts, productId)]);
       if (!order) throw new FormError("Select a valid order"); if (!vendor) throw new FormError("Select a valid vendor");
+      if (!isActiveOrder(order)) throw new FormError("Vendor products can only be assigned to active orders");
       if (!product || product.vendorId !== vendorId) throw new FormError("Select a product listed by this vendor");
       if (userRole === "supervisor") {
         const supervisorPerson = await findSessionPerson(collections, context);
         if (!supervisorPerson) throw new FormError("Add an active People record with your name and Supervisor role");
-        if (!isOrderSupervisor(order, supervisorPerson.id) || ["Completed", "Cancelled"].includes(order.status)) throw new FormError("Supervisor actions require an active assigned order");
+        if (!isOrderSupervisor(order, supervisorPerson.id) || !isActiveOrder(order)) throw new FormError("Supervisor actions require an active assigned order");
       }
       const productType = isProductType(product.productType) ? product.productType : "Quantity-wise";
       const measurement = normalizeMeasurement(payload.measurement ?? payload.quantity, productType);
@@ -716,7 +718,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
           throw new FormError("Vendor or payee cannot be recorded on an expense");
         }
         const ownedOrder = await collections.orders.findOne({ id: orderId }, { projection: { _id: 0 } });
-        if (!ownedOrder || !isOrderSupervisor(ownedOrder, supervisorPerson.id) || ["Completed", "Cancelled"].includes(ownedOrder.status)) throw new FormError("Supervisor actions require an active assigned order");
+        if (!ownedOrder || !isOrderSupervisor(ownedOrder, supervisorPerson.id) || !isActiveOrder(ownedOrder)) throw new FormError("Supervisor actions require an active assigned order");
         personId = supervisorPerson.id;
       }
       const [order, person] = await Promise.all([
@@ -821,7 +823,7 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
     const type = clean(body.type);
     const id = clean(body.id);
     const payload = body.payload ?? {};
-    if (!id || !["customer", "order", "payment", "vendorProduct"].includes(type)) {
+    if (!id || !["customer", "vendor", "order", "payment", "vendorProduct"].includes(type)) {
       return Response.json({ error: "Select a valid record to edit" }, { status: 400 });
     }
     const userRole = context.userRole;
@@ -837,6 +839,9 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
     }
     if (type === "vendorProduct" && !["admin", "accountant"].includes(userRole)) {
       return Response.json({ error: "Your role cannot edit vendor products" }, { status: 403 });
+    }
+    if (type === "vendor" && !canEditVendorProfile(userRole)) {
+      return Response.json({ error: "Your role cannot edit vendor profiles" }, { status: 403 });
     }
     if (type === "customer" && !canEditCustomerProfile(userRole)) {
       return Response.json({ error: "Your role cannot edit customer profiles" }, { status: 403 });
@@ -860,6 +865,24 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       };
       await collections.customers.updateOne({ id }, { $set: updates });
       return Response.json({ record: { ...existingCustomer, ...updates } });
+    }
+
+    if (type === "vendor") {
+      const missing = required(payload, ["name", "phone"]);
+      if (missing) return Response.json({ error: `${missing} is required` }, { status: 400 });
+      const existingVendor = await findById(collections.vendors, id);
+      if (!existingVendor) return Response.json({ error: "Vendor not found" }, { status: 404 });
+      const updates = {
+        name: clean(payload.name),
+        contactPerson: clean(payload.contactPerson),
+        phone: clean(payload.phone),
+        email: clean(payload.email).toLowerCase(),
+        gstin: clean(payload.gstin),
+        address: clean(payload.address),
+        paymentMode: clean(payload.paymentMode) || "Bank transfer",
+      };
+      await collections.vendors.updateOne({ id }, { $set: updates });
+      return Response.json({ record: { ...existingVendor, ...updates } });
     }
 
     if (type === "vendorProduct") {
@@ -954,13 +977,14 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
       Promise.all(supervisorIds.map((supervisorId) => findById(collections.persons, supervisorId))),
     ]);
     if (!existingOrder) return Response.json({ error: "Order not found" }, { status: 404 });
+    if (existingOrder.status === ARCHIVED_ORDER_STATUS) return Response.json({ error: "Archived orders cannot be edited" }, { status: 403 });
     if (existingOrder.status === "Completed" && userRole !== "admin") {
       return Response.json({ error: "Only an administrator can edit a completed order" }, { status: 403 });
     }
     if (userRole === "supervisor") {
       const supervisorPerson = await findSessionPerson(collections, context);
       if (!supervisorPerson) throw new FormError("Add an active People record with your name and Supervisor role");
-      if (!isOrderSupervisor(existingOrder, supervisorPerson.id) || ["Completed", "Cancelled"].includes(existingOrder.status)) throw new FormError("Supervisor actions require an active assigned order");
+      if (!isOrderSupervisor(existingOrder, supervisorPerson.id) || !isActiveOrder(existingOrder)) throw new FormError("Supervisor actions require an active assigned order");
       const updates = {
         title: clean(payload.title),
         venue: clean(payload.venue),
@@ -1064,10 +1088,25 @@ export async function DELETE(request: Request, context: RequestContext = { userR
     const body = (await request.json()) as { type?: string; id?: string };
     const type = clean(body.type);
     const id = clean(body.id);
-    if (!id || !["vendorProduct", "expenseCategory"].includes(type)) return Response.json({ error: "Select a valid record to delete" }, { status: 400 });
+    if (!id || !["order", "orderVendor", "vendorProduct", "expenseCategory"].includes(type)) return Response.json({ error: "Select a valid record to delete" }, { status: 400 });
+    if (type === "order" && context.userRole !== "admin") return Response.json({ error: "Only administrators can delete orders" }, { status: 403 });
+    if (type === "orderVendor" && !["admin", "accountant"].includes(context.userRole)) return Response.json({ error: "Your role cannot remove vendor assignments" }, { status: 403 });
     if (type === "vendorProduct" && !["admin", "accountant"].includes(context.userRole)) return Response.json({ error: "Your role cannot delete vendor products" }, { status: 403 });
     if (type === "expenseCategory" && context.userRole !== "admin") return Response.json({ error: "Only administrators can delete expense categories" }, { status: 403 });
     const { collections } = await getMongoDatabase();
+    if (type === "order") {
+      const order = await collections.orders.findOne({ id }, { projection: { _id: 0 } });
+      if (!order) return Response.json({ error: "Order not found" }, { status: 404 });
+      if (order.status === ARCHIVED_ORDER_STATUS) return Response.json({ error: "Order is already in history" }, { status: 409 });
+      await collections.orders.updateOne({ id }, { $set: { status: ARCHIVED_ORDER_STATUS } });
+      return Response.json({ record: { ...order, status: ARCHIVED_ORDER_STATUS } });
+    }
+    if (type === "orderVendor") {
+      const assignment = await collections.orderVendors.findOne({ id }, { projection: { _id: 0 } });
+      if (!assignment) return Response.json({ error: "Vendor assignment not found" }, { status: 404 });
+      await collections.orderVendors.deleteOne({ id });
+      return Response.json({ record: assignment });
+    }
     if (type === "expenseCategory") {
       const category = await collections.expenseCategories.findOne({ id, status: "Active" }, { projection: { _id: 0 } });
       if (!category) return Response.json({ error: "Expense category not found" }, { status: 404 });
