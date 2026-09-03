@@ -44,9 +44,13 @@ type ReimbursementSubmission = {
 };
 
 export function isReimbursementSubmission(expense: ReimbursementSubmission, legacySupervisorExpense = false) {
-  if (String(expense.fundingSource ?? "Reimbursement").trim().toLowerCase() === "account") return false;
+  const fundingSource = String(expense.fundingSource ?? "").trim().toLowerCase();
+  if (fundingSource === "account") return false;
+  if (fundingSource !== "reimbursement" && !legacySupervisorExpense) return false;
   const submittedByRole = String(expense.submittedByRole ?? "").trim().toLowerCase();
-  if (!submittedByRole) return legacySupervisorExpense;
+  // Funding source was introduced before submitter snapshots. During that
+  // compatibility window, an explicit reimbursement selection is authoritative.
+  if (!submittedByRole) return fundingSource === "reimbursement" || legacySupervisorExpense;
   if (submittedByRole === "supervisor" || submittedByRole === "admin") return true;
   return submittedByRole === "accountant" && legacySupervisorExpense;
 }
@@ -56,8 +60,14 @@ export function isOwnReimbursementSubmission(
   user: { userId?: string; personId?: string },
   legacyOwnExpense = false,
 ) {
+  const fundingSource = String(expense.fundingSource ?? "").trim().toLowerCase();
+  if (fundingSource === "account") return false;
   const submittedByRole = String(expense.submittedByRole ?? "").trim().toLowerCase();
-  if (!submittedByRole) return legacyOwnExpense;
+  if (!submittedByRole) {
+    const expensePersonId = String(expense.personId ?? "").trim();
+    const personId = String(user.personId ?? "").trim();
+    return (fundingSource === "reimbursement" && Boolean(expensePersonId && personId && expensePersonId === personId)) || legacyOwnExpense;
+  }
   if (submittedByRole !== "supervisor") return false;
   const submittedByUserId = String(expense.submittedByUserId ?? "").trim();
   const userId = String(user.userId ?? "").trim();
@@ -65,6 +75,18 @@ export function isOwnReimbursementSubmission(
   const submittedByPersonId = String(expense.submittedByPersonId ?? expense.personId ?? "").trim();
   const personId = String(user.personId ?? "").trim();
   return Boolean(submittedByPersonId && personId && submittedByPersonId === personId);
+}
+
+export function canViewReimbursementSubmission(
+  expense: ReimbursementSubmission,
+  user: { role?: string; userId?: string; personId?: string },
+  legacySupervisorExpense = false,
+  legacyOwnExpense = false,
+) {
+  if (!isReimbursementSubmission(expense, legacySupervisorExpense)) return false;
+  const role = String(user.role ?? "").trim().toLowerCase();
+  if (role === "supervisor") return isOwnReimbursementSubmission(expense, user, legacyOwnExpense);
+  return role === "admin" || role === "accountant";
 }
 
 export function reimbursementPending(amount: number, reimbursedAmount: number) {

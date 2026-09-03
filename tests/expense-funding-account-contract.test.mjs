@@ -12,9 +12,12 @@ async function load(path) {
 }
 
 test("payment account defaults and legacy expense funding remain compatible", async () => {
-  const { DEFAULT_PAYMENT_ACCOUNTS, expenseFundingSource, expenseNeedsReimbursement, paymentAccountKey } = await load("app/payment-accounts.ts");
+  const { DEFAULT_PAYMENT_ACCOUNTS, expenseFundingSource, expenseFundingSourceLabel, expenseNeedsReimbursement, paymentAccountKey } = await load("app/payment-accounts.ts");
   assert.deepEqual(DEFAULT_PAYMENT_ACCOUNTS.map((account) => account.name), ["Hope and Dream", "eRentals"]);
   assert.equal(expenseFundingSource(undefined), "Reimbursement");
+  assert.equal(expenseFundingSourceLabel(undefined), "Not recorded");
+  assert.equal(expenseFundingSourceLabel("Reimbursement"), "Reimbursement");
+  assert.equal(expenseFundingSourceLabel("Account"), "Company account");
   assert.equal(expenseNeedsReimbursement({}), true);
   assert.equal(expenseNeedsReimbursement({ fundingSource: "Account" }), false);
   assert.equal(paymentAccountKey("  Hope   and Dream "), "hope and dream");

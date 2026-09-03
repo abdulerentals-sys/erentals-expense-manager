@@ -7,7 +7,7 @@ import { getDb } from "../../../db";
 import { expenses, orders, paymentAccounts, persons, payments } from "../../../db/schema";
 import { isOrderSupervisor, type OrderSupervisorFields } from "../../order-supervisors";
 import { expenseFundingSource, expenseNeedsReimbursement } from "../../payment-accounts";
-import { isOwnReimbursementSubmission, isReimbursementSubmission, reimbursementPending, reimbursementStatus } from "../../supervisor-expenses";
+import { canViewReimbursementSubmission, isReimbursementSubmission, reimbursementPending, reimbursementStatus } from "../../supervisor-expenses";
 
 type SessionUser = NonNullable<Awaited<ReturnType<typeof getSessionUser>>>;
 type ExpenseRow = { id: string; expenseNo: string; orderId: string; personId: string; category: string; vendor: string; description: string; expenseDate: string; amount: number; paymentMode: string; receiptKey: string; receiptName: string; fundingSource?: string; paymentAccountId?: string; paymentAccountName?: string; status?: string; reimbursedAmount?: number; submittedByUserId?: string; submittedByPersonId?: string; submittedByName?: string; submittedByRole?: string; claimantName?: string; claimantRole?: string; orderNoSnapshot?: string; orderTitleSnapshot?: string; createdAt?: string; [key: string]: unknown };
@@ -59,8 +59,12 @@ function buildResponse(user: SessionUser, expenseRows: ExpenseRow[], orderRows: 
     const legacyOwnExpense = isLegacySupervisorExpense(expense, order, person)
       && ownOrderIds.has(String(expense.orderId))
       && String(expense.personId) === String(currentPersonId);
-    return isSubmittedReimbursement(expense, order, person)
-      && (user.role !== "supervisor" || isOwnReimbursementSubmission(expense, { userId: user.id, personId: user.personId || currentPersonId }, legacyOwnExpense));
+    return canViewReimbursementSubmission(
+      expense,
+      { role: user.role, userId: user.id, personId: user.personId || currentPersonId },
+      isLegacySupervisorExpense(expense, order, person),
+      legacyOwnExpense,
+    );
   }).map((expense) => {
     const order = orderMap.get(String(expense.orderId));
     const person = personMap.get(String(expense.personId));
@@ -77,8 +81,8 @@ function buildResponse(user: SessionUser, expenseRows: ExpenseRow[], orderRows: 
       claimantRole: clean(expense.claimantRole) || person?.role || "",
       submittedByUserId: clean(expense.submittedByUserId),
       submittedByPersonId: clean(expense.submittedByPersonId),
-      submittedByName: clean(expense.submittedByName) || person?.name || "",
-      submittedByRole: clean(expense.submittedByRole) || "supervisor",
+      submittedByName: clean(expense.submittedByName),
+      submittedByRole: clean(expense.submittedByRole),
     };
   }).sort((a, b) => String(b.createdAt || b.expenseDate).localeCompare(String(a.createdAt || a.expenseDate)));
   const ownExpenseIds = new Set(rows.map((expense) => String(expense.id)).filter(Boolean));
