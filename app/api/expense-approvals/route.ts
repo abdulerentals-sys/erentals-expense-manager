@@ -1,13 +1,13 @@
 import { eq } from "drizzle-orm";
 import { getSessionUser } from "../../auth/session";
-import { isOrderTeamPerson, resolveUserPersonId } from "../../auth/team";
+import { resolveUserPersonId } from "../../auth/team";
 import type { UserRole } from "../../auth/types";
 import { ensureSchema } from "../../../db/ensure";
 import { getDb } from "../../../db";
 import { expenses, orders, paymentAccounts, persons, payments } from "../../../db/schema";
 import { isOrderSupervisor, type OrderSupervisorFields } from "../../order-supervisors";
-import { expenseFundingSource, expenseNeedsReimbursement } from "../../payment-accounts";
-import { canViewReimbursementSubmission, isReimbursementSubmission, reimbursementPending, reimbursementStatus } from "../../supervisor-expenses";
+import { expenseFundingSource } from "../../payment-accounts";
+import { canViewReimbursementSubmission, isLegacyReimbursementClaim, isReimbursementSubmission, reimbursementPending, reimbursementStatus } from "../../supervisor-expenses";
 
 type SessionUser = NonNullable<Awaited<ReturnType<typeof getSessionUser>>>;
 type ExpenseRow = { id: string; expenseNo: string; orderId: string; personId: string; category: string; vendor: string; description: string; expenseDate: string; amount: number; paymentMode: string; receiptKey: string; receiptName: string; fundingSource?: string; paymentAccountId?: string; paymentAccountName?: string; status?: string; reimbursedAmount?: number; submittedByUserId?: string; submittedByPersonId?: string; submittedByName?: string; submittedByRole?: string; claimantName?: string; claimantRole?: string; orderNoSnapshot?: string; orderTitleSnapshot?: string; createdAt?: string; [key: string]: unknown };
@@ -26,12 +26,12 @@ function allowedAction(role: UserRole, action: string) {
   return false;
 }
 
-function isLegacySupervisorExpense(expense: ExpenseRow, order: OrderRow | null | undefined, person: PersonRow | null | undefined) {
-  return expenseNeedsReimbursement(expense) && isOrderTeamPerson(person, "supervisor") && isOrderSupervisor(order, String(expense.personId));
+function isLegacySupervisorExpense(expense: ExpenseRow, person: PersonRow | null | undefined) {
+  return isLegacyReimbursementClaim(expense, person);
 }
 
-function isSubmittedReimbursement(expense: ExpenseRow, order: OrderRow | null | undefined, person: PersonRow | null | undefined) {
-  return isReimbursementSubmission(expense, isLegacySupervisorExpense(expense, order, person));
+function isSubmittedReimbursement(expense: ExpenseRow, person: PersonRow | null | undefined) {
+  return isReimbursementSubmission(expense, isLegacySupervisorExpense(expense, person));
 }
 
 export async function GET() {
@@ -52,17 +52,15 @@ function buildResponse(user: SessionUser, expenseRows: ExpenseRow[], orderRows: 
   const orderMap = new Map(orderRows.map((order) => [String(order.id), order]));
   const personMap = new Map(personRows.map((person) => [String(person.id), person]));
   const ownOrders = user.role === "supervisor" ? orderRows.filter((order) => isOrderSupervisor(order, currentPersonId)) : orderRows;
-  const ownOrderIds = new Set(ownOrders.map((order) => String(order.id)));
   const rows = expenseRows.filter((expense) => {
-    const order = orderMap.get(String(expense.orderId));
     const person = personMap.get(String(expense.personId));
-    const legacyOwnExpense = isLegacySupervisorExpense(expense, order, person)
-      && ownOrderIds.has(String(expense.orderId))
+    const legacySupervisorExpense = isLegacySupervisorExpense(expense, person);
+    const legacyOwnExpense = legacySupervisorExpense
       && String(expense.personId) === String(currentPersonId);
     return canViewReimbursementSubmission(
       expense,
       { role: user.role, userId: user.id, personId: user.personId || currentPersonId },
-      isLegacySupervisorExpense(expense, order, person),
+      legacySupervisorExpense,
       legacyOwnExpense,
     );
   }).map((expense) => {
@@ -118,16 +116,14 @@ export async function POST(request: Request) {
   if (isNetlify()) return mutateMongo(user, action, expenseId, money(body.amount), body);
   await ensureSchema();
   const db = getDb();
-  const [expenseRows, orderRows, personRows] = await Promise.all([
+  const [expenseRows, personRows] = await Promise.all([
     db.select().from(expenses).where(eq(expenses.id, expenseId)),
-    db.select().from(orders),
     db.select().from(persons),
   ]);
   const expense = expenseRows[0];
   if (!expense) return Response.json({ error: "Expense not found" }, { status: 404 });
-  const order = orderRows.find((row) => String(row.id) === String(expense.orderId));
   const person = personRows.find((row) => String(row.id) === String(expense.personId));
-  if (!isSubmittedReimbursement(expense as ExpenseRow, order as unknown as OrderRow | undefined, person as unknown as PersonRow | undefined)) return Response.json({ error: "Only reimbursement forms submitted by a supervisor or administrator can use this workflow" }, { status: 409 });
+  if (!isSubmittedReimbursement(expense as ExpenseRow, person as unknown as PersonRow | undefined)) return Response.json({ error: "Only reimbursement forms submitted by a supervisor or administrator can use this workflow" }, { status: 409 });
   const status = reimbursementStatus(expense.status, expense.amount, expense.reimbursedAmount);
   if (action === "approve" || action === "reject") {
     if (status !== "Pending approval") return Response.json({ error: `A ${status.toLowerCase()} reimbursement cannot be changed` }, { status: 409 });
@@ -155,13 +151,12 @@ async function mutateMongo(user: SessionUser, action: string, expenseId: string,
   try {
     const db = client.db();
     const expensesCollection = db.collection<ExpenseRow>("expenses");
-    const ordersCollection = db.collection<OrderRow>("orders");
     const personsCollection = db.collection<PersonRow>("persons");
     const paymentsCollection = db.collection<PaymentRow>("payments");
     const expense = await expensesCollection.findOne({ id: expenseId });
     if (!expense) return Response.json({ error: "Expense not found" }, { status: 404 });
-    const [order, person] = await Promise.all([ordersCollection.findOne({ id: expense.orderId }), personsCollection.findOne({ id: expense.personId })]);
-    if (!isSubmittedReimbursement(expense, order, person)) return Response.json({ error: "Only reimbursement forms submitted by a supervisor or administrator can use this workflow" }, { status: 409 });
+    const person = await personsCollection.findOne({ id: expense.personId });
+    if (!isSubmittedReimbursement(expense, person)) return Response.json({ error: "Only reimbursement forms submitted by a supervisor or administrator can use this workflow" }, { status: 409 });
     const status = reimbursementStatus(expense.status, Number(expense.amount), Number(expense.reimbursedAmount));
     if (action === "approve" || action === "reject") {
       if (status !== "Pending approval") return Response.json({ error: `A ${status.toLowerCase()} reimbursement cannot be changed` }, { status: 409 });
