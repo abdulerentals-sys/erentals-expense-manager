@@ -52,12 +52,13 @@ test("the existing expense dashboard gains clickable reimbursement details witho
   assert.match(ensure, /reimbursed_amount/);
 });
 
-test("supervisor expenses are filtered to the assigned supervisor and reimbursement does not become customer payment", async () => {
+test("supervisor reimbursements remain claimant-scoped and do not become customer payments", async () => {
   const [route, dashboard] = await Promise.all([
     read("app/api/expense-approvals/route.ts"),
     read("app/components/ExpenseDashboard.tsx"),
   ]);
-  assert.match(route, /isOrderTeamPerson/);
+  assert.match(route, /isLegacyReimbursementClaim/);
+  assert.match(route, /canViewReimbursementSubmission/);
   assert.match(route, /isOrderSupervisor/);
   assert.match(route, /user\.role === "supervisor"/);
   assert.match(route, /String\(expense\.personId\) === String\(currentPersonId\)/);

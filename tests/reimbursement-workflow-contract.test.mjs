@@ -12,7 +12,7 @@ async function load(path) {
 }
 
 test("explicit reimbursement selections remain eligible when older records lack submitter metadata", async () => {
-  const { canViewReimbursementSubmission, isReimbursementSubmission, isOwnReimbursementSubmission } = await load("app/supervisor-expenses.ts");
+  const { canViewReimbursementSubmission, isLegacyReimbursementClaim, isReimbursementSubmission, isOwnReimbursementSubmission } = await load("app/supervisor-expenses.ts");
 
   assert.equal(isReimbursementSubmission({ fundingSource: "Reimbursement", submittedByRole: "supervisor" }), true);
   assert.equal(isReimbursementSubmission({ fundingSource: "Reimbursement", submittedByRole: "admin" }), true);
@@ -38,6 +38,12 @@ test("explicit reimbursement selections remain eligible when older records lack 
   assert.equal(canViewReimbursementSubmission(legacyRequest, { role: "supervisor", personId: "person-1" }), true);
   assert.equal(canViewReimbursementSubmission(legacyRequest, { role: "supervisor", personId: "person-2" }), false);
   assert.equal(canViewReimbursementSubmission(legacyRequest, { role: "sales", personId: "person-1" }), false);
+
+  assert.equal(isLegacyReimbursementClaim({}, { role: "Supervisor", status: "Inactive" }), true);
+  assert.equal(isLegacyReimbursementClaim({}, { role: "Execution manager", status: "Active" }), true);
+  assert.equal(isLegacyReimbursementClaim({ claimantRole: "Supervisor" }, null), true);
+  assert.equal(isLegacyReimbursementClaim({}, { role: "Sales person", status: "Active" }), false);
+  assert.equal(isLegacyReimbursementClaim({ fundingSource: "Account" }, { role: "Supervisor", status: "Active" }), false);
 });
 
 test("paid reimbursements stay in approved order cost and leave no pending balance", async () => {

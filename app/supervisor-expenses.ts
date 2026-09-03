@@ -41,7 +41,22 @@ type ReimbursementSubmission = {
   submittedByUserId?: unknown;
   submittedByPersonId?: unknown;
   personId?: unknown;
+  claimantRole?: unknown;
 };
+
+type ReimbursementClaimant = {
+  role?: unknown;
+};
+
+export function isLegacyReimbursementClaim(
+  expense: ReimbursementSubmission,
+  person: ReimbursementClaimant | null | undefined,
+) {
+  const fundingSource = String(expense.fundingSource ?? "").trim().toLowerCase();
+  if (fundingSource === "account") return false;
+  const claimantRole = String(expense.claimantRole ?? person?.role ?? "").trim().toLowerCase();
+  return claimantRole.includes("supervisor") || claimantRole.includes("execution manager");
+}
 
 export function isReimbursementSubmission(expense: ReimbursementSubmission, legacySupervisorExpense = false) {
   const fundingSource = String(expense.fundingSource ?? "").trim().toLowerCase();
