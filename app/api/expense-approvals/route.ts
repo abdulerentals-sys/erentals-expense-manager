@@ -19,6 +19,7 @@ const now = () => new Date().toISOString();
 const clean = (value: unknown) => String(value ?? "").trim();
 const money = (value: unknown) => Math.max(0, Math.round(Number(value) || 0));
 const isNetlify = () => Boolean(process.env.MONGODB_URI?.trim());
+const mongoDatabaseName = () => process.env.MONGODB_DB_NAME?.trim() || "erentals_expense_manager";
 
 function allowedAction(role: UserRole, action: string) {
   if (["approve", "reject"].includes(action)) return role === "admin";
@@ -95,7 +96,7 @@ async function getMongoData(user: SessionUser) {
   const client = new MongoClient(process.env.MONGODB_URI as string);
   await client.connect();
   try {
-    const db = client.db();
+    const db = client.db(mongoDatabaseName());
     const [expenseRows, orderRows, personRows, paymentRows] = await Promise.all([db.collection<ExpenseRow>("expenses").find({}).toArray(), db.collection<OrderRow>("orders").find({}).toArray(), db.collection<PersonRow>("persons").find({}).toArray(), db.collection<PaymentRow>("payments").find({}).toArray()]);
     return buildResponse(user, expenseRows, orderRows, personRows, paymentRows);
   } finally { await client.close(); }
@@ -149,7 +150,7 @@ async function mutateMongo(user: SessionUser, action: string, expenseId: string,
   const client = new MongoClient(process.env.MONGODB_URI as string);
   await client.connect();
   try {
-    const db = client.db();
+    const db = client.db(mongoDatabaseName());
     const expensesCollection = db.collection<ExpenseRow>("expenses");
     const personsCollection = db.collection<PersonRow>("persons");
     const paymentsCollection = db.collection<PaymentRow>("payments");
