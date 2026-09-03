@@ -215,7 +215,7 @@ export async function POST(request: Request) {
   }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.POST(request, { userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
+    return mongodb.POST(request, { userId: user.id, userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
   }
 
   try {
@@ -570,7 +570,7 @@ export async function POST(request: Request) {
       }
       const [[order], [person]] = await Promise.all([
         db.select().from(orders).where(eq(orders.id, orderId)).limit(1),
-        db.select({ id: persons.id, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, personId)).limit(1),
+        db.select({ id: persons.id, name: persons.name, role: persons.role, status: persons.status }).from(persons).where(eq(persons.id, personId)).limit(1),
       ]);
       if (!order) return Response.json({ error: "Select a valid order" }, { status: 400 });
       if (!person) return Response.json({ error: "Select a valid responsible person" }, { status: 400 });
@@ -605,6 +605,14 @@ export async function POST(request: Request) {
         paymentAccountId,
         paymentAccountName: paymentAccount?.name || "",
         status: fundingSource === "Account" ? "Approved" : "Pending approval",
+        submittedByUserId: user.id,
+        submittedByPersonId: user.role === "supervisor" ? personId : user.personId,
+        submittedByName: user.name,
+        submittedByRole: user.role,
+        claimantName: person.name,
+        claimantRole: person.role,
+        orderNoSnapshot: order.orderNo,
+        orderTitleSnapshot: order.title || order.venue,
         createdAt,
       };
       await db.insert(expenses).values(row);
@@ -721,7 +729,7 @@ export async function PATCH(request: Request) {
   }
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.PATCH(request, { userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
+    return mongodb.PATCH(request, { userId: user.id, userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
   }
 
   try {
@@ -1004,7 +1012,7 @@ export async function DELETE(request: Request) {
   if (type === "paymentAccount" && user.role !== "admin") return Response.json({ error: "Only administrators can delete payment accounts" }, { status: 403 });
   if (usesNetlifyStorage()) {
     const mongodb = await import("./mongodb");
-    return mongodb.DELETE(request, { userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
+    return mongodb.DELETE(request, { userId: user.id, userRole: user.role, userPersonId: user.personId, userName: user.name, userEmail: user.email });
   }
   try {
     await ensureSchema();

@@ -15,7 +15,7 @@ import { DEFAULT_PAYMENT_ACCOUNTS, expenseFundingSource, paymentAccountKey, type
 import { calculateTentativeCost, isProductType, normalizeMeasurement, type PricingBasis, type ProductType } from "../../vendor-pricing";
 
 type Payload = Record<string, unknown>;
-type RequestContext = { userRole: UserRole; userPersonId: string; userName: string; userEmail: string };
+type RequestContext = { userId: string; userRole: UserRole; userPersonId: string; userName: string; userEmail: string };
 
 type Customer = {
   id: string;
@@ -120,6 +120,14 @@ type Expense = {
   disapprovedAt?: string;
   disapprovedBy?: string;
   reimbursedAmount?: number;
+  submittedByUserId?: string;
+  submittedByPersonId?: string;
+  submittedByName?: string;
+  submittedByRole?: string;
+  claimantName?: string;
+  claimantRole?: string;
+  orderNoSnapshot?: string;
+  orderTitleSnapshot?: string;
   createdAt: string;
 };
 
@@ -130,6 +138,7 @@ type Payment = {
   personId: string;
   vendorId: string;
   invoiceId: string;
+  expenseId?: string;
   customerId: string;
   direction: string;
   amount: number;
@@ -318,7 +327,9 @@ function ensureMongoIndexes(collections: Collections) {
         { upsert: true },
       )),
       collections.payments.createIndex({ customerId: 1 }),
+      collections.payments.createIndex({ id: 1 }, { unique: true }),
       collections.payments.createIndex({ orderId: 1 }),
+      collections.payments.createIndex({ expenseId: 1 }),
       collections.payments.createIndex({ personId: 1 }),
       collections.payments.createIndex({ vendorId: 1 }),
       collections.payments.createIndex({ invoiceId: 1 }),
@@ -411,7 +422,7 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userName: "", userEmail: "" }) {
+export async function POST(request: Request, context: RequestContext = { userId: "", userRole: "admin", userPersonId: "", userName: "", userEmail: "" }) {
   try {
     const body = (await request.json()) as { type?: string; payload?: Payload };
     const type = clean(body.type);
@@ -802,6 +813,14 @@ export async function POST(request: Request, context: RequestContext = { userRol
         paymentAccountName: paymentAccount?.name || "",
         status: fundingSource === "Account" ? "Approved" : "Pending approval",
         reimbursedAmount: 0,
+        submittedByUserId: context.userId,
+        submittedByPersonId: userRole === "supervisor" ? personId : context.userPersonId,
+        submittedByName: context.userName,
+        submittedByRole: userRole,
+        claimantName: person.name,
+        claimantRole: person.role,
+        orderNoSnapshot: order.orderNo,
+        orderTitleSnapshot: order.title || order.venue,
         createdAt,
       };
       await collections.expenses.insertOne(row);
@@ -874,7 +893,7 @@ export async function POST(request: Request, context: RequestContext = { userRol
   }
 }
 
-export async function PATCH(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userName: "", userEmail: "" }) {
+export async function PATCH(request: Request, context: RequestContext = { userId: "", userRole: "admin", userPersonId: "", userName: "", userEmail: "" }) {
   try {
     const body = (await request.json()) as { type?: string; id?: string; payload?: Payload };
     const type = clean(body.type);
@@ -1164,7 +1183,7 @@ export async function PATCH(request: Request, context: RequestContext = { userRo
   }
 }
 
-export async function DELETE(request: Request, context: RequestContext = { userRole: "admin", userPersonId: "", userName: "", userEmail: "" }) {
+export async function DELETE(request: Request, context: RequestContext = { userId: "", userRole: "admin", userPersonId: "", userName: "", userEmail: "" }) {
   try {
     const body = (await request.json()) as { type?: string; id?: string };
     const type = clean(body.type);
