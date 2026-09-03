@@ -82,7 +82,7 @@ test("admin reimbursement entries expose approved, paid and rejected actions in 
     assert.match(dashboard, new RegExp(label, "i"));
   }
   assert.match(dashboard, /action:\s*"paid"/);
-  assert.match(dashboard, /updateSupervisorExpense\(expense,\s*"reject"\)/);
+  assert.match(dashboard, /updateSupervisorExpense\((?:expense|reviewExpense),\s*"reject"\)/);
   assert.match(approvals, /\["approve",\s*"reject"\]/);
   assert.match(approvals, /action === "paid"/);
   assert.match(approvals, /status:\s*"Paid"/);
@@ -97,4 +97,25 @@ test("the reimbursement queue refreshes when an expense is created without repla
   assert.match(dashboard, /<section className="panel supervisor-reimbursement-panel"/);
   assert.match(dashboard, /<BreakdownPanel title="Order-wise expenses"/);
   assert.match(dashboard, /<BreakdownPanel title="Person-wise expenses"/);
+});
+
+test("admins can open pending requests and review accept, reject and paid actions", async () => {
+  const [dashboard, records, mongo, approvals] = await Promise.all([
+    read("app/components/ExpenseDashboard.tsx"),
+    read("app/api/records/route.ts"),
+    read("app/api/records/mongodb.ts"),
+    read("app/api/expense-approvals/route.ts"),
+  ]);
+
+  for (const source of [records, mongo]) {
+    assert.match(source, /status:\s*fundingSource === "Account" \? "Approved" : "Pending approval"/);
+  }
+  assert.match(dashboard, /Pending requests/);
+  assert.match(dashboard, /pendingRequestExpenses = workflow\.expenses\.filter/);
+  assert.match(dashboard, /setReimbursementView\("pending"\)/);
+  assert.match(dashboard, /setReviewExpense\(expense\)/);
+  assert.match(dashboard, />Accept</);
+  assert.match(dashboard, />Reject</);
+  assert.match(dashboard, />Mark paid</);
+  assert.match(approvals, /if \(action === "paid" && status !== "Approved"\)/);
 });
