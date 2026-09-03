@@ -11,23 +11,33 @@ async function load(path) {
   return import(`data:text/javascript;base64,${Buffer.from(output).toString("base64")}`);
 }
 
-test("reimbursement submissions include supervisor and admin forms while preserving legacy supervisor claims", async () => {
-  const { isReimbursementSubmission, isOwnReimbursementSubmission } = await load("app/supervisor-expenses.ts");
+test("explicit reimbursement selections remain eligible when older records lack submitter metadata", async () => {
+  const { canViewReimbursementSubmission, isReimbursementSubmission, isOwnReimbursementSubmission } = await load("app/supervisor-expenses.ts");
 
   assert.equal(isReimbursementSubmission({ fundingSource: "Reimbursement", submittedByRole: "supervisor" }), true);
   assert.equal(isReimbursementSubmission({ fundingSource: "Reimbursement", submittedByRole: "admin" }), true);
   assert.equal(isReimbursementSubmission({ fundingSource: "Reimbursement", submittedByRole: "accountant" }), false);
   assert.equal(isReimbursementSubmission({ fundingSource: "Reimbursement", submittedByRole: "accountant" }, true), true);
   assert.equal(isReimbursementSubmission({ fundingSource: "Account", submittedByRole: "admin" }), false);
-  assert.equal(isReimbursementSubmission({ fundingSource: "Reimbursement" }, true), true);
-  assert.equal(isReimbursementSubmission({ fundingSource: "Reimbursement" }, false), false);
+  assert.equal(isReimbursementSubmission({ fundingSource: "Reimbursement" }, false), true);
+  assert.equal(isReimbursementSubmission({}, true), true);
+  assert.equal(isReimbursementSubmission({}, false), false);
 
   const submitted = { submittedByRole: "supervisor", submittedByUserId: "user-1", submittedByPersonId: "person-1", personId: "person-1" };
   assert.equal(isOwnReimbursementSubmission(submitted, { userId: "user-1", personId: "" }), true);
   assert.equal(isOwnReimbursementSubmission(submitted, { userId: "", personId: "person-1" }), true);
   assert.equal(isOwnReimbursementSubmission(submitted, { userId: "user-2", personId: "person-2" }), false);
   assert.equal(isOwnReimbursementSubmission({ ...submitted, submittedByRole: "admin" }, { userId: "user-1", personId: "person-1" }), false);
+  assert.equal(isOwnReimbursementSubmission({ fundingSource: "Reimbursement", personId: "person-1" }, { personId: "person-1" }), true);
+  assert.equal(isOwnReimbursementSubmission({ fundingSource: "Reimbursement", personId: "person-1" }, { personId: "person-2" }), false);
   assert.equal(isOwnReimbursementSubmission({}, { userId: "", personId: "" }, true), true);
+
+  const legacyRequest = { fundingSource: "Reimbursement", personId: "person-1" };
+  assert.equal(canViewReimbursementSubmission(legacyRequest, { role: "admin" }), true);
+  assert.equal(canViewReimbursementSubmission(legacyRequest, { role: "accountant" }), true);
+  assert.equal(canViewReimbursementSubmission(legacyRequest, { role: "supervisor", personId: "person-1" }), true);
+  assert.equal(canViewReimbursementSubmission(legacyRequest, { role: "supervisor", personId: "person-2" }), false);
+  assert.equal(canViewReimbursementSubmission(legacyRequest, { role: "sales", personId: "person-1" }), false);
 });
 
 test("paid reimbursements stay in approved order cost and leave no pending balance", async () => {
@@ -69,7 +79,7 @@ test("D1 and Mongo persist submission snapshots for reimbursement eligibility an
   assert.match(mongo, /submittedByUserId:\s*context\.userId/);
   assert.match(mongo, /submittedByRole:\s*userRole/);
   assert.match(approvals, /isReimbursementSubmission/);
-  assert.match(approvals, /isOwnReimbursementSubmission/);
+  assert.match(approvals, /canViewReimbursementSubmission/);
 });
 
 test("admin reimbursement entries expose approved, paid and rejected actions in the existing dashboard", async () => {
