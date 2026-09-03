@@ -88,6 +88,19 @@ test("D1 and Mongo persist submission snapshots for reimbursement eligibility an
   assert.match(approvals, /canViewReimbursementSubmission/);
 });
 
+test("the reimbursement workflow uses the same named MongoDB database as existing expense records", async () => {
+  const [records, approvals] = await Promise.all([
+    read("app/api/records/mongodb.ts"),
+    read("app/api/expense-approvals/route.ts"),
+  ]);
+
+  for (const source of [records, approvals]) {
+    assert.match(source, /process\.env\.MONGODB_DB_NAME\?\.trim\(\) \|\| "erentals_expense_manager"/);
+  }
+  assert.doesNotMatch(approvals, /client\.db\(\)/);
+  assert.match(approvals, /client\.db\(mongoDatabaseName\(\)\)/g);
+});
+
 test("admin reimbursement entries expose approved, paid and rejected actions in the existing dashboard", async () => {
   const [dashboard, approvals] = await Promise.all([
     read("app/components/ExpenseDashboard.tsx"),
