@@ -1,0 +1,1 @@
+ALTER TABLE `payments` ADD `expense_id` text DEFAULT '' NOT NULL;
